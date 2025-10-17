@@ -15,7 +15,7 @@ readme = "README.md"
 compio = { version = "0.16", features = ["macros"] }
 
 [dev-dependencies]
-compio = { version = "0.16", features = ["macros"] }
+compio = { version = "0.16", features = ["macros", "time"] }
 
 [lib]
 name = "compio_sync"
