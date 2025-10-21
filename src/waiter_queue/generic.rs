@@ -77,16 +77,16 @@ impl WaiterQueue {
                 // Successfully claimed single slot
                 {
                     let mut single = self.single.lock();
-                    
+
                     // Check before registration
                     if condition() {
                         self.mode.store(MODE_EMPTY, Ordering::Release);
                         return true;
                     }
-                    
+
                     // Register
                     *single = Some(waker);
-                    
+
                     // Re-check after registration to prevent lost wake
                     if condition() {
                         // Remove and reset mode
@@ -180,12 +180,9 @@ impl WaiterQueue {
     fn wake_one_from_multi(&self) -> bool {
         let waker = {
             let mut waiters = self.multi.lock();
-            let waker = waiters.pop_front();
-
             // If queue is now empty, defer mode update to caller
             // (caller may still need to check single slot)
-
-            waker
+            waiters.pop_front()
         };
 
         // Wake outside lock
@@ -245,7 +242,6 @@ impl Default for WaiterQueue {
         Self::new()
     }
 }
-
 
 #[cfg(test)]
 mod tests {
