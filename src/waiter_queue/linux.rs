@@ -55,7 +55,7 @@ impl WaiterQueue {
     ///
     /// This is used by platform-specific Future implementations.
     /// Only available when using IoUring variant.
-    /// 
+    ///
     /// TODO: Integrate with Semaphore/Condvar futures for full io_uring usage
     #[allow(dead_code)]
     #[cfg(target_os = "linux")]
@@ -242,7 +242,7 @@ impl IoUringWaiterQueue {
     ///
     /// This is used by platform-specific Future implementations to create
     /// futex wait operations.
-    /// 
+    ///
     /// TODO: Integrate with Semaphore/Condvar futures for full io_uring usage
     #[allow(dead_code)]
     pub(crate) fn get_futex(&self) -> Arc<AtomicU32> {
@@ -320,7 +320,7 @@ impl Default for IoUringWaiterQueue {
 /// The waker is managed by compio's runtime when this operation is submitted.
 ///
 /// This is an internal implementation detail, not part of the public API.
-/// 
+///
 /// TODO: Integrate with Semaphore/Condvar futures for full io_uring usage
 #[allow(dead_code)]
 #[cfg(target_os = "linux")]
