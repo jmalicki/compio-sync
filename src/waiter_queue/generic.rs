@@ -1,12 +1,15 @@
 //! Generic cross-platform waiter queue implementation
 //!
-//! This implementation uses a lock-free queue (crossbeam-queue) or an optimized
-//! mutex (parking_lot) to manage waiting tasks. It works on all platforms including
-//! macOS, BSD, embedded systems, and any other target.
+//! **Phase 1 Implementation**: Uses parking_lot's optimized mutex with a hybrid approach:
+//! - Single-waiter fast path with atomic mode switching
+//! - Multi-waiter path using parking_lot::Mutex + VecDeque
+//!
+//! **Future Phases**: Phase 2 will add lock-free queue (crossbeam-queue) for generic,
+//! io_uring for Linux, and IOCP for Windows.
 //!
 //! Performance characteristics:
 //! - Fast path (uncontended): Userspace atomic CAS (~nanoseconds)
-//! - Slow path (contended): Lock-free queue operations or fast mutex
+//! - Slow path (contended): Fast parking_lot mutex (2-5x faster than std::Mutex)
 //! - No kernel involvement except waker.wake() which goes to the runtime
 
 use std::collections::VecDeque;
@@ -25,11 +28,11 @@ const MODE_EMPTY: u8 = 0;
 const MODE_SINGLE: u8 = 1;
 const MODE_MULTI: u8 = 2;
 
-/// Generic waiter queue implementation
+/// Generic waiter queue implementation (Phase 1)
 ///
 /// Uses a hybrid approach:
-/// - Single waiter fast path (no mutex)
-/// - Multiple waiters slow path (parking_lot mutex)
+/// - Single waiter fast path (atomic mode + parking_lot mutex for storage)
+/// - Multiple waiters slow path (parking_lot mutex + VecDeque)
 pub struct WaiterQueue {
     /// Current mode (empty, single, or multi)
     mode: AtomicU8,
@@ -217,25 +220,19 @@ impl WaiterQueue {
     }
 
     /// Get the number of waiting tasks (for debugging/stats)
+    ///
+    /// Note: This locks both storages to get a consistent count,
+    /// preventing races with concurrent mode transitions.
     pub fn waiter_count(&self) -> usize {
-        let mode = self.mode.load(Ordering::Acquire);
-
-        match mode {
-            MODE_EMPTY => 0,
-            MODE_SINGLE => {
-                let single = self.single.lock();
-                if single.is_some() {
-                    1
-                } else {
-                    0
-                }
-            }
-            MODE_MULTI => {
-                let waiters = self.multi.lock();
-                waiters.len()
-            }
-            _ => unreachable!("Invalid mode"),
-        }
+        // Lock order: single → multi (consistent with elsewhere)
+        // This prevents TOCTOU races where mode changes between reads
+        let single = self.single.lock();
+        let multi = self.multi.lock();
+        
+        let single_count = if single.is_some() { 1 } else { 0 };
+        let multi_count = multi.len();
+        
+        single_count + multi_count
     }
 }
 
@@ -273,6 +270,7 @@ impl WaiterQueueTrait for WaiterQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
     use std::task::Wake;
 
@@ -283,6 +281,18 @@ mod tests {
 
     fn dummy_waker() -> Waker {
         Arc::new(DummyWaker).into()
+    }
+
+    // CountingWaker to verify actual wakes happen
+    struct CountingWaker(AtomicUsize);
+    impl Wake for CountingWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn counting_waker(counter: &Arc<CountingWaker>) -> Waker {
+        counter.clone().into()
     }
 
     #[test]
@@ -358,5 +368,56 @@ mod tests {
         // Should not panic
         queue.wake_all();
         assert_eq!(queue.waiter_count(), 0);
+    }
+
+    #[test]
+    fn test_wake_one_calls_waker() {
+        let queue = WaiterQueue::new();
+        let counter = Arc::new(CountingWaker(AtomicUsize::new(0)));
+        
+        // Add waiter
+        queue.add_waiter_if(|| false, counting_waker(&counter));
+        assert_eq!(counter.0.load(Ordering::Relaxed), 0);
+        
+        // Wake should call the waker
+        queue.wake_one();
+        assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_wake_all_calls_all_wakers() {
+        let queue = WaiterQueue::new();
+        let counter = Arc::new(CountingWaker(AtomicUsize::new(0)));
+        
+        // Add 5 waiters
+        for _ in 0..5 {
+            queue.add_waiter_if(|| false, counting_waker(&counter));
+        }
+        assert_eq!(counter.0.load(Ordering::Relaxed), 0);
+        
+        // Wake all should call all 5 wakers
+        queue.wake_all();
+        assert_eq!(counter.0.load(Ordering::Relaxed), 5);
+    }
+
+    #[test]
+    fn test_wake_one_multiple_waiters() {
+        let queue = WaiterQueue::new();
+        let counter = Arc::new(CountingWaker(AtomicUsize::new(0)));
+        
+        // Add 3 waiters
+        for _ in 0..3 {
+            queue.add_waiter_if(|| false, counting_waker(&counter));
+        }
+        
+        // Wake one at a time
+        queue.wake_one();
+        assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+        
+        queue.wake_one();
+        assert_eq!(counter.0.load(Ordering::Relaxed), 2);
+        
+        queue.wake_one();
+        assert_eq!(counter.0.load(Ordering::Relaxed), 3);
     }
 }

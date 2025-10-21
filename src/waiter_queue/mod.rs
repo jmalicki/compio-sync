@@ -3,17 +3,22 @@
 //! This module provides different implementations of waiter queues based on the
 //! target platform to achieve optimal performance:
 //!
-//! - **Linux**: Uses io_uring futex operations for unified event loop
-//! - **Windows**: Uses IOCP for unified event loop
-//! - **Generic**: Uses lock-free queue or mutex for other platforms
+//! - **Linux**: (Phase 2) Will use io_uring futex operations for unified event loop
+//! - **Windows**: (Phase 3) Will use IOCP for unified event loop
+//! - **Generic**: (Phase 1 - Current) Uses parking_lot mutex with hybrid single/multi mode
 //!
-//! All implementations provide the same interface, ensuring consistent behavior
-//! across platforms while leveraging platform-specific optimizations.
+//! **Current Status**: All platforms use the generic implementation (Phase 1).
+//! Platform-specific optimizations will be added in Phase 2 (Linux) and Phase 3 (Windows).
+//!
+//! All implementations provide the same interface via `WaiterQueueTrait`, ensuring
+//! consistent behavior across platforms while enabling platform-specific optimizations.
 
 // Generic implementation - always compiled (used as baseline and fallback)
 mod generic;
 
-// Platform-specific modules (currently stub implementations that re-export generic)
+// Platform-specific modules
+// Phase 1: These re-export generic implementation
+// Phase 2+: Will have platform-specific optimizations
 #[cfg(target_os = "linux")]
 mod linux;
 
