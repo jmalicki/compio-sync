@@ -26,7 +26,7 @@ pub struct WaiterQueue {
 }
 
 impl WaiterQueue {
-    pub fn new() -> Self {7F64-0EC5
+    pub fn new() -> Self {
         // Try to get io_uring handle from compio
         // If unavailable or kernel too old, fall back to generic
         todo!("Phase 2: Implement io_uring futex integration")

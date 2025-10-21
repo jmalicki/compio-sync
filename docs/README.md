@@ -1,353 +1,321 @@
 # compio-sync Documentation
 
-Welcome to the compio-sync documentation! This directory contains research, design documents, and implementation plans for building lock-free async synchronization primitives.
-
-## 📚 Documentation Index
-
-### 🎯 Start Here
-
-**[Implementation Plan: Lock-Free Wakeups](./implementation-plan-lockfree.md)**
-- Quick-start guide for implementing lock-free wakeups
-- Step-by-step instructions for each phase
-- Testing and benchmarking strategies
-- Timeline and resource estimates
-
-### 🔬 Research & Analysis
-
-**[Mutex-Free Wakeup Research](./mutex-free-wakeup-research.md)**
-- Comprehensive research on lock-free async patterns
-- Analysis of Tokio, Python asyncio, and other systems
-- Detailed comparison of different approaches
-- Pros, cons, and trade-offs for each method
-- Academic references and prior art
-
-**[Wakeup Approaches: Visual Comparison](./wakeup-approaches-comparison.md)**
-- Side-by-side code comparisons
-- Visual explanation of race conditions and prevention
-- Performance characteristics table
-- Memory ordering analysis
-- Decision matrix for choosing approaches
-
-### 📋 Existing Design Docs
-
-**[Semaphore Design](./semaphore-design.md)**
-- Original semaphore implementation design
-- Architecture and integration points
-- Testing strategy
-- Performance characteristics
-
-## 🎯 Quick Navigation by Use Case
-
-### "I want to implement lock-free wakeups"
-→ Start with **[Implementation Plan](./implementation-plan-lockfree.md)**
-
-### "I want to understand different approaches"
-→ Read **[Visual Comparison](./wakeup-approaches-comparison.md)**
-
-### "I want deep technical analysis"
-→ Read **[Research Document](./mutex-free-wakeup-research.md)**
-
-### "I want to understand the current architecture"
-→ Read **[Semaphore Design](./semaphore-design.md)**
-
-## 🗂️ Document Relationships
-
-```
-┌─────────────────────────────────────────────────────┐
-│  Start: Implementation Plan (How to do it)          │
-│  - Quick start guide                                │
-│  - Step-by-step instructions                        │
-│  - Timeline and resources                           │
-└──────────────────┬──────────────────────────────────┘
-                   │
-                   ▼
-┌─────────────────────────────────────────────────────┐
-│  Visual Comparison (Easy to understand)             │
-│  - Side-by-side code examples                       │
-│  - Performance tables                               │
-│  - Decision matrix                                  │
-└──────────────────┬──────────────────────────────────┘
-                   │
-                   ▼
-┌─────────────────────────────────────────────────────┐
-│  Research Document (Deep dive)                      │
-│  - Detailed analysis of each approach               │
-│  - Academic references                              │
-│  - Implementation details                           │
-└──────────────────┬──────────────────────────────────┘
-                   │
-                   ▼
-┌─────────────────────────────────────────────────────┐
-│  Semaphore Design (Current implementation)          │
-│  - Existing architecture                            │
-│  - Integration points                               │
-└─────────────────────────────────────────────────────┘
-```
-
-## 📊 Summary of Approaches
-
-### Current Implementation
-- **Tech**: `std::sync::Mutex<VecDeque<Waker>>`
-- **Status**: Production-ready
-- **Performance**: Good
-- **Complexity**: Low
-
-### Phase 1: parking_lot + AtomicWaker
-- **Tech**: `parking_lot::Mutex` + `AtomicWaker` for single waiter
-- **Timeline**: 1-2 days
-- **Performance**: +20-30%
-- **Complexity**: Medium
-- **Risk**: Low
-
-### Phase 2: crossbeam Lock-Free
-- **Tech**: `crossbeam-queue::SegQueue`
-- **Timeline**: 1 week
-- **Performance**: +40-60%
-- **Complexity**: Medium
-- **Risk**: Medium
-
-### Phase 3: Intrusive Lists (Optional)
-- **Tech**: Tokio-style intrusive linked lists
-- **Timeline**: 3-4 weeks
-- **Performance**: +80-100%
-- **Complexity**: Very High
-- **Risk**: High
-
-## 🎓 Learning Path
-
-### For Beginners
-1. Read the [Visual Comparison](./wakeup-approaches-comparison.md) to understand the basics
-2. Review [Semaphore Design](./semaphore-design.md) to understand current architecture
-3. Look at simple code examples in Visual Comparison
-
-### For Implementers
-1. Start with [Implementation Plan](./implementation-plan-lockfree.md)
-2. Review [Visual Comparison](./wakeup-approaches-comparison.md) for code patterns
-3. Reference [Research Document](./mutex-free-wakeup-research.md) for details as needed
-
-### For Researchers
-1. Read [Research Document](./mutex-free-wakeup-research.md) cover to cover
-2. Follow references and academic papers
-3. Review [Visual Comparison](./wakeup-approaches-comparison.md) for implementation details
-
-## 🔍 Key Concepts Explained
-
-### What is a "truly async" wakeup?
-
-**Current (with mutex):**
-```rust
-// Uses blocking mutex
-lock.acquire()     // Could block thread briefly
-queue.push(waker)
-lock.release()
-```
-
-**Lock-free (truly async):**
-```rust
-// Uses atomic operations only
-queue.push(waker)  // Never blocks, just retries CAS
-```
-
-### Why eliminate mutexes?
-
-1. **Performance**: Lock-free operations are faster under contention
-2. **Latency**: No blocking, even briefly
-3. **Scalability**: Better performance with many cores
-4. **Correctness**: No deadlock risk, no priority inversion
-
-### What are spurious wakeups?
-
-A spurious wakeup is when a task is woken but the condition it was waiting for is still false:
-
-```rust
-// Task wakes up
-let permit = sem.acquire().await;
-// But semaphore might have no permits!
-// Task will just wait again (handled automatically by poll())
-```
-
-**Important**: This is standard in async Rust and handled correctly by all async runtimes.
-
-### What are intrusive linked lists?
-
-In an intrusive list, the list node lives inside the object itself (or on its stack frame):
-
-**Normal list:**
-```rust
-struct Node<T> {
-    data: T,
-    next: Option<Box<Node<T>>>,
-}
-// Node allocated on heap
-```
-
-**Intrusive list:**
-```rust
-struct Waiter {
-    next: AtomicPtr<Waiter>,
-    waker: Waker,
-    // ... other fields
-}
-// Waiter lives on Future's stack frame!
-```
-
-**Benefits**: Zero allocations, faster
-**Cost**: Complex unsafe code, requires Pin
-
-## 🧪 Testing Strategy
-
-All approaches must pass:
-
-### Functional Tests
-- ✅ Basic acquire/release
-- ✅ Multiple waiters
-- ✅ Future cancellation
-- ✅ High concurrency
-
-### Concurrency Tests
-- ✅ No lost wakeups
-- ✅ No deadlocks
-- ✅ Correct under contention
-
-### Performance Tests
-- ✅ Benchmark vs baseline
-- ✅ Low/medium/high contention
-- ✅ Single vs multiple waiters
-
-See [Implementation Plan](./implementation-plan-lockfree.md#testing-strategy) for details.
-
-## 📈 Performance Expectations
-
-### Phase 1 (parking_lot + AtomicWaker)
-- **Single waiter**: 30-50% faster
-- **Multiple waiters**: 20-30% faster
-- **High contention**: 25-35% faster
-
-### Phase 2 (crossbeam)
-- **Single waiter**: 40-60% faster
-- **Multiple waiters**: 40-60% faster
-- **High contention**: 50-70% faster
-
-### Phase 3 (intrusive lists)
-- **Single waiter**: 80-100% faster
-- **Multiple waiters**: 80-100% faster
-- **High contention**: 100-150% faster
-
-*Note: Percentages are relative to current std::sync::Mutex implementation*
-
-## 🚦 Current Status
-
-- ✅ Research complete
-- ✅ Documentation written
-- ⬜ Phase 1 implementation
-- ⬜ Phase 1 benchmarks
-- ⬜ Phase 2 implementation
-- ⬜ Phase 2 benchmarks
-- ⬜ Phase 3 evaluation
-
-## 🤝 Contributing
-
-When adding new documentation:
-
-1. **Update this README** with links to your document
-2. **Follow the structure**:
-   - Problem statement
-   - Solution approaches
-   - Code examples
-   - Trade-offs
-   - Recommendations
-3. **Include code examples** where appropriate
-4. **Link to related documents**
-5. **Update the "Document Relationships" diagram**
-
-## 📝 Document Templates
-
-### For New Design Documents
-
-```markdown
-# [Feature Name]
-
-## Problem Statement
-What problem are we solving?
-
-## Background
-What context is needed?
-
-## Proposed Solution
-How do we solve it?
-
-## Alternatives Considered
-What else did we think about?
-
-## Trade-offs
-Pros and cons of each approach
-
-## Implementation Plan
-Step-by-step guide
-
-## Testing Strategy
-How do we verify correctness?
-
-## Performance Impact
-Expected performance changes
-
-## References
-Links to prior art, papers, etc.
-```
-
-## 🔗 External Resources
-
-### Rust Async Runtimes
-- [Tokio Documentation](https://tokio.rs)
-- [Tokio Source Code](https://github.com/tokio-rs/tokio)
-- [smol Runtime](https://github.com/smol-rs/smol)
-- [async-std](https://async.rs)
-
-### Lock-Free Data Structures
-- [crossbeam](https://github.com/crossbeam-rs/crossbeam)
-- [parking_lot](https://github.com/Amanieu/parking_lot)
-- [event-listener](https://github.com/smol-rs/event-listener)
-
-### Learning Resources
-- [Rust Atomics and Locks Book](https://marabos.nl/atomics/)
-- [The Art of Multiprocessor Programming](https://www.amazon.com/Art-Multiprocessor-Programming-Maurice-Herlihy/dp/0123973376)
-- [Is Parallel Programming Hard?](https://www.kernel.org/pub/linux/kernel/people/paulmck/perfbook/perfbook.html)
-
-### Academic Papers
-- "Simple, Fast, and Practical Non-Blocking Queues" (Michael & Scott, 1996)
-- "Practical lock-freedom" (Keir Fraser, 2004)
-- "Hazard Pointers: Safe Memory Reclamation" (Maged Michael, 2004)
-
-## 📞 Questions?
-
-- **General questions**: Check the [Visual Comparison](./wakeup-approaches-comparison.md)
-- **Implementation questions**: See [Implementation Plan](./implementation-plan-lockfree.md)
-- **Deep technical questions**: Read [Research Document](./mutex-free-wakeup-research.md)
-- **Current architecture**: Review [Semaphore Design](./semaphore-design.md)
-
-## 🎯 Recommended Reading Order
-
-### Quick Overview (30 minutes)
-1. This README
-2. Visual Comparison (code examples section)
-3. Implementation Plan (Phase 1 section)
-
-### Implementation Ready (2 hours)
-1. This README
-2. Visual Comparison (full)
-3. Implementation Plan (full)
-4. Semaphore Design (current architecture)
-
-### Complete Understanding (4+ hours)
-1. This README
-2. Semaphore Design
-3. Visual Comparison
-4. Research Document
-5. External resources and papers
+Welcome to the compio-sync documentation! This directory contains comprehensive guides for understanding, implementing, and contributing to platform-specific async synchronization primitives.
 
 ---
 
-**Last Updated**: 2025-10-21  
-**Document Version**: 1.0  
-**Maintained By**: compio-sync project team
+## 🚀 Quick Start
 
+**👉 [Complete Index](INDEX.md)** - Full navigation guide with all documents
+
+### New to the project?
+1. **[Executive Summary](progress/EXECUTIVE_SUMMARY.md)** (15 min) - High-level overview
+2. **[Progress Summary](progress/PROGRESS_SUMMARY.md)** (30 min) - Current status
+
+### Want to understand the approach?
+1. **[Research README](research/README.md)** (15 min) - Research overview
+2. **[Wakeup Comparison](research/wakeup-approaches-comparison.md)** (1 hr) - Visual guide
+
+### Ready to contribute?
+1. **[Implementation README](implementation/README.md)** (5 min) - Implementation overview
+2. **[Detailed Plan](implementation/IMPLEMENTATION_PLAN_DETAILED.md)** (2 hrs) - Complete guide
+
+---
+
+## 📁 Directory Structure
+
+```
+docs/
+├── README.md                    # This file - start here
+├── INDEX.md                     # Complete navigation guide
+│
+├── progress/                    # 📊 Project status & milestones
+│   ├── README.md                   # Progress index
+│   ├── EXECUTIVE_SUMMARY.md        # High-level overview
+│   └── PROGRESS_SUMMARY.md         # Detailed status report
+│
+├── research/                    # 🔬 Background research & analysis
+│   ├── README.md                   # Research index
+│   ├── mutex-free-wakeup-research.md       # Complete analysis (100 pages)
+│   └── wakeup-approaches-comparison.md     # Visual comparisons (50 pages)
+│
+├── design/                      # 🏗️ Architecture & design docs
+│   ├── README.md                   # Design index
+│   └── semaphore-design.md         # Original semaphore design
+│
+└── implementation/              # 📋 Implementation plans & guides
+    ├── README.md                   # Implementation index
+    ├── implementation-plan-lockfree.md     # High-level roadmap
+    ├── IMPLEMENTATION_PLAN_DETAILED.md     # Complete guide with CI/CD
+    └── PHASE2_PLAN.md                      # Linux io_uring specifics
+```
+
+---
+
+## 🎯 Documentation by Goal
+
+### I want to understand the project
+
+| Document | Time | Purpose |
+|----------|------|---------|
+| [Executive Summary](progress/EXECUTIVE_SUMMARY.md) | 5 min | Quick overview of goals and approach |
+| [Progress Summary](progress/PROGRESS_SUMMARY.md) | 10 min | Current status and achievements |
+| [Research Overview](research/README.md) | 15 min | Why we chose this design |
+
+### I want to understand the technical approach
+
+| Document | Time | Purpose |
+|----------|------|---------|
+| [Wakeup Research](research/mutex-free-wakeup-research.md) | 1 hour | Deep dive into async synchronization |
+| [Approach Comparison](research/wakeup-approaches-comparison.md) | 30 min | Visual code comparisons |
+| [Semaphore Design](design/semaphore-design.md) | 20 min | Original implementation |
+
+### I want to implement features
+
+| Document | Time | Purpose |
+|----------|------|---------|
+| [Implementation Plans](implementation/README.md) | 5 min | Overview of all phases |
+| [Detailed Plan](implementation/IMPLEMENTATION_PLAN_DETAILED.md) | 30 min | Complete roadmap with CI/CD |
+| [Phase 2 Plan](implementation/PHASE2_PLAN.md) | 20 min | Linux io_uring specifics |
+
+---
+
+## 🚀 Project Phases
+
+### ✅ Phase 1: Complete
+- **Status**: Done
+- **Docs**: [Progress Summary](progress/PROGRESS_SUMMARY.md)
+- **What**: Platform-specific module architecture with generic implementation
+- **Result**: 2-5x performance improvement, all platforms supported
+
+### 🚧 Phase 2: In Progress
+- **Status**: Planning
+- **Docs**: [Phase 2 Plan](implementation/PHASE2_PLAN.md)
+- **What**: Linux io_uring futex integration
+- **Goal**: Unified event loop on Linux
+
+### 📅 Phase 3: Planned
+- **Status**: Not started
+- **Docs**: Coming soon
+- **What**: Windows IOCP integration
+- **Goal**: Unified event loop on Windows
+
+---
+
+## 📚 Document Summaries
+
+### Progress Documents
+
+#### [Executive Summary](progress/EXECUTIVE_SUMMARY.md)
+**Type**: Overview | **Length**: ~50 pages | **Audience**: Everyone
+
+High-level overview of the entire project:
+- What we're building and why
+- Three-tier platform strategy
+- Key decisions and trade-offs
+- Current status and next steps
+
+**Read this first** if you're new to the project.
+
+#### [Progress Summary](progress/PROGRESS_SUMMARY.md)
+**Type**: Status Report | **Length**: ~30 pages | **Audience**: Contributors
+
+Detailed progress report:
+- What we've accomplished (Phase 1)
+- Technical achievements
+- Test results and benchmarks
+- Next steps for Phase 2 and 3
+
+**Read this** to understand current state.
+
+---
+
+### Research Documents
+
+#### [Mutex-Free Wakeup Research](research/mutex-free-wakeup-research.md)
+**Type**: Technical Analysis | **Length**: ~100 pages | **Audience**: Technical deep-dive
+
+Comprehensive research analyzing:
+- Tokio's intrusive linked lists
+- Python asyncio's approach
+- crossbeam's lock-free queues
+- io_uring futex operations
+- Windows IOCP capabilities
+- Trade-offs and recommendations
+
+**Read this** for deep technical understanding.
+
+#### [Wakeup Approaches Comparison](research/wakeup-approaches-comparison.md)
+**Type**: Visual Guide | **Length**: ~50 pages | **Audience**: All levels
+
+Side-by-side code comparisons:
+- Current vs Phase 1 vs Phase 2/3
+- Memory ordering explanations
+- Race condition prevention
+- Platform-specific examples
+- Decision matrices
+
+**Read this** for visual understanding.
+
+---
+
+### Design Documents
+
+#### [Semaphore Design](design/semaphore-design.md)
+**Type**: Original Design | **Length**: ~10 pages | **Audience**: Understanding current code
+
+Original semaphore implementation design:
+- Architecture and integration points
+- Performance characteristics
+- Testing strategy
+- Use cases and requirements
+
+**Read this** to understand the baseline.
+
+---
+
+### Implementation Documents
+
+#### [Lock-Free Implementation Plan](implementation/implementation-plan-lockfree.md)
+**Type**: Roadmap | **Length**: ~40 pages | **Audience**: Implementers
+
+High-level implementation strategy:
+- Three-phase approach
+- Platform-specific strategies
+- Timeline and milestones
+- Risk management
+
+**Read this** for implementation overview.
+
+#### [Detailed Implementation Plan](implementation/IMPLEMENTATION_PLAN_DETAILED.md)
+**Type**: Complete Guide | **Length**: ~60 pages | **Audience**: Implementers
+
+Step-by-step implementation guide:
+- Directory structure
+- CI/CD configuration (copy-paste ready)
+- Testing strategy and examples
+- Benchmarking setup
+- Timeline with daily tasks
+
+**Read this** when ready to implement.
+
+#### [Phase 2 Plan](implementation/PHASE2_PLAN.md)
+**Type**: Specific Plan | **Length**: ~20 pages | **Audience**: Linux implementers
+
+Linux io_uring futex implementation:
+- Prerequisites and research
+- Integration with compio
+- Kernel version detection
+- Step-by-step tasks
+- Potential challenges
+
+**Read this** for Phase 2 work.
+
+---
+
+## 🔍 Finding Information
+
+### By Topic
+
+| Topic | Primary Document | Secondary |
+|-------|-----------------|-----------|
+| **Project Overview** | [Executive Summary](progress/EXECUTIVE_SUMMARY.md) | [Progress Summary](progress/PROGRESS_SUMMARY.md) |
+| **Why lock-free?** | [Research](research/mutex-free-wakeup-research.md) | [Comparison](research/wakeup-approaches-comparison.md) |
+| **Current implementation** | [Semaphore Design](design/semaphore-design.md) | [Progress Summary](progress/PROGRESS_SUMMARY.md) |
+| **Platform strategy** | [Research](research/mutex-free-wakeup-research.md) | [Executive Summary](progress/EXECUTIVE_SUMMARY.md) |
+| **How to implement** | [Detailed Plan](implementation/IMPLEMENTATION_PLAN_DETAILED.md) | [Lock-Free Plan](implementation/implementation-plan-lockfree.md) |
+| **Linux io_uring** | [Phase 2 Plan](implementation/PHASE2_PLAN.md) | [Research](research/mutex-free-wakeup-research.md) |
+| **Windows IOCP** | [Research](research/mutex-free-wakeup-research.md) | TBD |
+| **Testing** | [Detailed Plan](implementation/IMPLEMENTATION_PLAN_DETAILED.md) | [Progress Summary](progress/PROGRESS_SUMMARY.md) |
+| **CI/CD** | [Detailed Plan](implementation/IMPLEMENTATION_PLAN_DETAILED.md) | - |
+| **Performance** | [Progress Summary](progress/PROGRESS_SUMMARY.md) | [Comparison](research/wakeup-approaches-comparison.md) |
+
+### By Audience
+
+**New Contributors**: Start with [Executive Summary](progress/EXECUTIVE_SUMMARY.md), then [Progress Summary](progress/PROGRESS_SUMMARY.md)
+
+**Researchers**: Read [Research docs](research/README.md) and [Comparison](research/wakeup-approaches-comparison.md)
+
+**Implementers**: Start with [Implementation Plans](implementation/README.md)
+
+**Reviewers**: Read [Progress Summary](progress/PROGRESS_SUMMARY.md) and relevant implementation plan
+
+**Users**: Check [Executive Summary](progress/EXECUTIVE_SUMMARY.md) for high-level features
+
+---
+
+## 🛠️ Contributing to Documentation
+
+### Adding New Documentation
+
+1. **Choose the right directory**:
+   - `progress/` - Project status, milestones
+   - `research/` - Technical research, analysis
+   - `design/` - Design documents, architecture
+   - `implementation/` - Implementation guides, plans
+
+2. **Update the appropriate README** in that directory
+
+3. **Update this main README** with navigation links
+
+4. **Follow the format**:
+   ```markdown
+   # Title
+   
+   **Type**: Document type
+   **Status**: Draft/Complete/Updated
+   **Audience**: Who should read this
+   
+   ## Summary
+   Brief description
+   
+   ## Contents
+   ...
+   ```
+
+### Document Types
+
+- **Overview**: High-level summary (5-10 pages)
+- **Analysis**: Deep technical dive (50-100 pages)
+- **Guide**: Step-by-step instructions (20-60 pages)
+- **Status**: Progress reports (10-30 pages)
+- **Plan**: Implementation roadmap (20-40 pages)
+
+---
+
+## 📊 Documentation Statistics
+
+```
+Total Documents: 9
+Total Pages: ~400 pages
+Research: ~150 pages
+Implementation: ~120 pages
+Progress: ~80 pages
+Design: ~50 pages
+```
+
+**Last Updated**: 2025-10-21
+**Current Phase**: Phase 1 Complete, Phase 2 Starting
+
+---
+
+## 🔗 External References
+
+- [Tokio Documentation](https://tokio.rs)
+- [compio Repository](https://github.com/compio-rs/compio)
+- [io_uring Documentation](https://kernel.dk/io_uring.pdf)
+- [Rust Atomics and Locks](https://marabos.nl/atomics/)
+
+---
+
+## 💡 Tips for Reading
+
+1. **Start broad, go deep**: Begin with summaries, then dive into details
+2. **Follow links**: Documents are interconnected for easy navigation
+3. **Check dates**: Docs are updated as the project evolves
+4. **Use search**: Docs are comprehensive - use Ctrl+F liberally
+5. **Read code examples**: Visual examples clarify concepts
+
+---
+
+**Questions?** Check the [FAQ section](research/README.md#faq) or open an issue!
