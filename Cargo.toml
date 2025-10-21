@@ -23,6 +23,11 @@ atomic-waker = "1.1"
 # Type-safe enum conversions for atomic mode
 num_enum = "0.7"
 
+# Linux-specific: io_uring for futex operations
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = "0.7"
+compio-driver = "0.9"
+
 [dev-dependencies]
 compio = { version = "0.16", features = ["macros", "time"] }
 criterion = { version = "0.5", features = ["async_tokio"] }
