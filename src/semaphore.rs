@@ -26,7 +26,7 @@
 //! # }
 //! ```
 
-use crate::waiter_queue::WaiterQueue;
+use crate::waiter_queue::{WaiterQueue, WaiterQueueTrait};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -65,11 +65,17 @@ use std::task::{Context, Poll};
 /// }
 /// # }
 /// ```
-pub struct Semaphore {
+pub struct SemaphoreGeneric<W: WaiterQueueTrait> {
     /// Internal state for the semaphore
     /// Users should wrap in `Arc<Semaphore>` when sharing between tasks
-    inner: SemaphoreInner,
+    inner: SemaphoreInner<W>,
 }
+
+/// Public type alias using platform-specific WaiterQueue
+///
+/// This is what users actually interact with. The generic implementation
+/// allows for flexibility and testing while this alias keeps the API simple.
+pub type Semaphore = SemaphoreGeneric<WaiterQueue>;
 
 /// Internal shared state for the semaphore
 ///
@@ -83,17 +89,17 @@ pub struct Semaphore {
 /// **Future optimization**: Could use intrusive linked list (like tokio) to avoid
 /// allocations and improve cache locality. However, this requires unsafe code and
 /// is significantly more complex. The current VecDeque approach is proven and fast enough.
-struct SemaphoreInner {
+struct SemaphoreInner<W: WaiterQueueTrait> {
     /// Available permits (atomic for lock-free operations)
     permits: AtomicUsize,
     /// Maximum permits (for metrics and debugging)
     max_permits: usize,
     /// Waiter queue abstraction (handles mutex + wait/wake pattern)
     /// See `waiter_queue.rs` for why mutex is safe in async code
-    waiters: WaiterQueue,
+    waiters: W,
 }
 
-impl Semaphore {
+impl<W: WaiterQueueTrait> SemaphoreGeneric<W> {
     /// Create a new semaphore with the given number of permits
     ///
     /// # Arguments
@@ -119,7 +125,7 @@ impl Semaphore {
             inner: SemaphoreInner {
                 permits: AtomicUsize::new(permits),
                 max_permits: permits,
-                waiters: WaiterQueue::new(),
+                waiters: W::new(),
             },
         }
     }
@@ -142,7 +148,7 @@ impl Semaphore {
     /// drop(permit);  // Release permit
     /// # }
     /// ```
-    pub async fn acquire(&self) -> SemaphorePermit<'_> {
+    pub async fn acquire(&self) -> SemaphorePermit<'_, W> {
         AcquireFuture { semaphore: self }.await
     }
 
@@ -165,7 +171,7 @@ impl Semaphore {
     /// assert!(permit2.is_none());  // No permits left
     /// ```
     #[must_use]
-    pub fn try_acquire(&self) -> Option<SemaphorePermit<'_>> {
+    pub fn try_acquire(&self) -> Option<SemaphorePermit<'_, W>> {
         // Fast path: atomic decrement if permits available
         let mut current = self.inner.permits.load(Ordering::Acquire);
 
@@ -352,12 +358,12 @@ impl Semaphore {
 /// assert_eq!(sem.available_permits(), 10);
 /// # }
 /// ```
-pub struct SemaphorePermit<'a> {
+pub struct SemaphorePermit<'a, W: WaiterQueueTrait> {
     /// Reference to the semaphore that issued this permit
-    semaphore: &'a Semaphore,
+    semaphore: &'a SemaphoreGeneric<W>,
 }
 
-impl<'a> Drop for SemaphorePermit<'a> {
+impl<'a, W: WaiterQueueTrait> Drop for SemaphorePermit<'a, W> {
     fn drop(&mut self) {
         self.semaphore.release();
     }
@@ -369,13 +375,13 @@ impl<'a> Drop for SemaphorePermit<'a> {
 /// 1. Try the fast path (atomic decrement if permits available)
 /// 2. If no permits, register the task's waker and return `Poll::Pending`
 /// 3. When a permit is released, the waker is called and the future retries
-struct AcquireFuture<'a> {
+struct AcquireFuture<'a, W: WaiterQueueTrait> {
     /// The semaphore from which to acquire a permit
-    semaphore: &'a Semaphore,
+    semaphore: &'a SemaphoreGeneric<W>,
 }
 
-impl<'a> Future for AcquireFuture<'a> {
-    type Output = SemaphorePermit<'a>;
+impl<'a, W: WaiterQueueTrait> Future for AcquireFuture<'a, W> {
+    type Output = SemaphorePermit<'a, W>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // RACE-FREE PATTERN: Try-register-retry using WaiterQueue
