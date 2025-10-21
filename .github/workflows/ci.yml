@@ -71,6 +71,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
+        rust: [stable, nightly]
+        # Future: add windows-latest, macos-latest when platform-specific code is ready
     steps:
       - uses: actions/checkout@v4
       
