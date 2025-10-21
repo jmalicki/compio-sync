@@ -73,8 +73,7 @@ impl WaiterQueue {
     fn load_mode(&self, ordering: Ordering) -> Mode {
         // SAFETY: Mode is repr(u8) with values 0,1,2 only
         // The atomic ensures we only ever store valid Mode values
-        Mode::try_from(self.mode.load(ordering))
-            .expect("Invalid mode value in atomic")
+        Mode::try_from(self.mode.load(ordering)).expect("Invalid mode value in atomic")
     }
 
     /// Store a new mode
@@ -127,7 +126,7 @@ impl WaiterQueue {
                 .is_ok()
             {
                 // Successfully claimed single slot - use lock-free AtomicWaker!
-                
+
                 // Check before registration
                 if condition() {
                     self.store_mode(Mode::Empty, Ordering::Release);
@@ -144,7 +143,7 @@ impl WaiterQueue {
                     self.store_mode(Mode::Empty, Ordering::Release);
                     return true;
                 }
-                
+
                 // Successfully registered, pending
                 return false;
             }
@@ -155,17 +154,17 @@ impl WaiterQueue {
         if condition() {
             return true;
         }
-        
+
         let mut waiters = self.multi.lock();
-        
+
         // Migrate single-slot waiter if present (atomically take it)
         if let Some(prev) = self.single.take() {
             waiters.push_back(prev);
         }
-        
+
         // Register this waiter
         waiters.push_back(waker);
-        
+
         // Re-check after registration to prevent lost wake
         if condition() {
             // Remove our own registration
@@ -178,7 +177,7 @@ impl WaiterQueue {
             }
             return true;
         }
-        
+
         self.store_mode(Mode::Multi, Ordering::Release);
         false
     }
@@ -257,13 +256,13 @@ impl WaiterQueue {
         // Drain both storages
         // Single: lock-free atomic take
         let single_waker = self.single.take();
-        
+
         // Multi: lock and drain
         let multi_wakers = {
             let mut waiters = self.multi.lock();
             std::mem::take(&mut *waiters)
         };
-        
+
         // Reset mode after draining
         self.store_mode(Mode::Empty, Ordering::Release);
 
@@ -286,7 +285,7 @@ impl WaiterQueue {
     pub fn waiter_count(&self) -> usize {
         let mode = self.load_mode(Ordering::Acquire);
         let multi_count = self.multi.lock().len();
-        
+
         match mode {
             Mode::Empty => multi_count, // Should be 0, but check multi just in case
             Mode::Single => {
@@ -441,11 +440,11 @@ mod tests {
     fn test_wake_one_calls_waker() {
         let queue = WaiterQueue::new();
         let counter = Arc::new(CountingWaker(AtomicUsize::new(0)));
-        
+
         // Add waiter
         queue.add_waiter_if(|| false, counting_waker(&counter));
         assert_eq!(counter.0.load(Ordering::Relaxed), 0);
-        
+
         // Wake should call the waker
         queue.wake_one();
         assert_eq!(counter.0.load(Ordering::Relaxed), 1);
@@ -455,13 +454,13 @@ mod tests {
     fn test_wake_all_calls_all_wakers() {
         let queue = WaiterQueue::new();
         let counter = Arc::new(CountingWaker(AtomicUsize::new(0)));
-        
+
         // Add 5 waiters
         for _ in 0..5 {
             queue.add_waiter_if(|| false, counting_waker(&counter));
         }
         assert_eq!(counter.0.load(Ordering::Relaxed), 0);
-        
+
         // Wake all should call all 5 wakers
         queue.wake_all();
         assert_eq!(counter.0.load(Ordering::Relaxed), 5);
@@ -471,19 +470,19 @@ mod tests {
     fn test_wake_one_multiple_waiters() {
         let queue = WaiterQueue::new();
         let counter = Arc::new(CountingWaker(AtomicUsize::new(0)));
-        
+
         // Add 3 waiters
         for _ in 0..3 {
             queue.add_waiter_if(|| false, counting_waker(&counter));
         }
-        
+
         // Wake one at a time
         queue.wake_one();
         assert_eq!(counter.0.load(Ordering::Relaxed), 1);
-        
+
         queue.wake_one();
         assert_eq!(counter.0.load(Ordering::Relaxed), 2);
-        
+
         queue.wake_one();
         assert_eq!(counter.0.load(Ordering::Relaxed), 3);
     }
