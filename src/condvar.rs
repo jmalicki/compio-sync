@@ -29,10 +29,8 @@
 //! ```
 
 use crate::waiter_queue::{WaiterQueue, WaiterQueueTrait};
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::task::{Context, Poll};
+use std::task::Poll;
 
 /// A compio-compatible async condition variable for task notification
 ///
@@ -118,7 +116,7 @@ struct CondvarInner<W: WaiterQueueTrait> {
     waiters: W,
 }
 
-impl<W: WaiterQueueTrait> CondvarGeneric<W> {
+impl<W: WaiterQueueTrait + Sync> CondvarGeneric<W> {
     /// Create a new condition variable
     ///
     /// The condition variable starts in the "not notified" state.
@@ -158,7 +156,18 @@ impl<W: WaiterQueueTrait> CondvarGeneric<W> {
     /// # }
     /// ```
     pub async fn wait(&self) {
-        WaitFuture::<W> { condvar: self }.await
+        // Simple poll_fn wrapper around poll_add_waiter_if
+        std::future::poll_fn(|cx| {
+            match self
+                .inner
+                .waiters
+                .poll_add_waiter_if(|| self.inner.notified.load(Ordering::Acquire), cx)
+            {
+                Poll::Ready(true) => Poll::Ready(()),
+                Poll::Ready(false) | Poll::Pending => Poll::Pending,
+            }
+        })
+        .await
     }
 
     /// Notify one waiting task
@@ -240,46 +249,9 @@ impl<W: WaiterQueueTrait> CondvarGeneric<W> {
     }
 }
 
-impl<W: WaiterQueueTrait> Default for CondvarGeneric<W> {
+impl<W: WaiterQueueTrait + Sync> Default for CondvarGeneric<W> {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// Future returned by `Condvar::wait()`
-struct WaitFuture<'a, W: WaiterQueueTrait> {
-    /// The condition variable to wait on
-    condvar: &'a CondvarGeneric<W>,
-}
-
-impl<'a, W: WaiterQueueTrait> Future for WaitFuture<'a, W> {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // RACE-FREE PATTERN: Atomic check-and-add using WaiterQueue
-        //
-        // WaiterQueue.add_waiter_if() provides the critical atomicity:
-        // - Checks notified flag INSIDE mutex critical section
-        // - Adds waker to queue ONLY if condition is false
-        // - No TOCTOU race window between check and add
-        //
-        // Why this is safe for async code:
-        // - Mutex held for nanoseconds (just memory operations, no I/O, no syscalls)
-        // - No `.await` inside critical section (never yields while holding lock)
-        // - Futex-based on modern OS (~2-3 cycles when uncontended)
-        //
-        // See `waiter_queue.rs` for detailed explanation of why mutex is appropriate here.
-
-        let is_ready = self.condvar.inner.waiters.add_waiter_if(
-            || self.condvar.inner.notified.load(Ordering::Acquire),
-            cx.waker().clone(),
-        );
-
-        if is_ready {
-            Poll::Ready(())
-        } else {
-            Poll::Pending
-        }
     }
 }
 
