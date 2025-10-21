@@ -1,0 +1,57 @@
+name: Setup Rust Environment with sccache
+description: Sets up Rust toolchain with sccache and optimized caching for compio-sync project
+branding:
+  icon: package
+  color: orange
+
+inputs:
+  toolchain:
+    description: Rust toolchain version
+    required: false
+    default: 'stable'
+  components:
+    description: Additional components to install
+    required: false
+    default: 'rustfmt, clippy'
+
+runs:
+  using: composite
+  steps:
+    - name: Install Rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1.15.2
+      with:
+        toolchain: ${{ inputs.toolchain }}
+        components: ${{ inputs.components }}
+    
+    - name: Setup sccache
+      uses: mozilla-actions/sccache-action@v0.0.9
+    
+    # Enhanced caching strategy for Cargo dependencies
+    # This shares cache across all jobs in the workflow
+    - name: Cache Rust dependencies and build artifacts
+      uses: Swatinem/rust-cache@v2.8.1
+      with:
+        # Shared prefix for all compio-sync builds
+        prefix-key: "v1-compio-sync"
+        # Share cache across same OS and Cargo.lock
+        shared-key: "${{ runner.os }}-${{ inputs.toolchain }}"
+        # Enable comprehensive caching
+        cache-all-crates: "true"
+        # Save cache from all branches to maximize reuse
+        save-if: "true"
+        # Cache workspace target directory for cross-job reuse
+        workspaces: "."
+    
+    # Cache sccache compilation artifacts
+    # This is the key cache that speeds up compilation across jobs
+    - name: Cache sccache artifacts
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/sccache
+        # Key by OS, toolchain, and Cargo.lock for precise matching
+        key: sccache-${{ runner.os }}-${{ inputs.toolchain }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          sccache-${{ runner.os }}-${{ inputs.toolchain }}-
+          sccache-${{ runner.os }}-
+
