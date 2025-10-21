@@ -21,9 +21,6 @@ use compio_driver::{OpCode, OpEntry};
 #[cfg(target_os = "linux")]
 use std::pin::Pin;
 
-#[cfg(target_os = "linux")]
-use libc;
-
 /// Global cached result of futex support detection
 /// Uses lock-free atomic state machine for thread-safe lazy initialization
 /// 0 = not checked yet, 1 = not supported, 2 = supported
