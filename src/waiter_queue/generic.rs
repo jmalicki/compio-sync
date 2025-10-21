@@ -18,28 +18,41 @@ use std::task::Waker;
 
 use super::WaiterQueueTrait;
 
-// TODO: Decide between parking_lot or crossbeam after benchmarking
-// For now, using parking_lot as it's simpler and proven
+// Phase 1: parking_lot + AtomicWaker
+// - AtomicWaker for single-waiter fast path (lock-free!)
+// - parking_lot::Mutex for multi-waiter slow path
 
+use atomic_waker::AtomicWaker;
+use num_enum::{IntoPrimitive, TryFromPrimitive};
 use parking_lot::Mutex;
 
 /// Modes for the waiter queue
-const MODE_EMPTY: u8 = 0;
-const MODE_SINGLE: u8 = 1;
-const MODE_MULTI: u8 = 2;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoPrimitive, TryFromPrimitive)]
+#[repr(u8)]
+enum Mode {
+    /// No waiters in the queue
+    Empty = 0,
+    /// Exactly one waiter (uses AtomicWaker, lock-free!)
+    Single = 1,
+    /// Multiple waiters (uses Mutex<VecDeque>)
+    Multi = 2,
+}
 
 /// Generic waiter queue implementation (Phase 1)
 ///
 /// Uses a hybrid approach:
-/// - Single waiter fast path (atomic mode + parking_lot mutex for storage)
-/// - Multiple waiters slow path (parking_lot mutex + VecDeque)
+/// - Single waiter fast path: AtomicWaker (lock-free!)
+/// - Multiple waiters slow path: parking_lot::Mutex + VecDeque
+///
+/// This provides optimal performance for the common case (single waiter)
+/// while still handling high contention gracefully.
 pub struct WaiterQueue {
     /// Current mode (empty, single, or multi)
     mode: AtomicU8,
 
-    /// Fast path: single waiter storage
-    /// Using Option to avoid allocation when no waiter
-    single: Mutex<Option<Waker>>,
+    /// Fast path: single waiter storage (lock-free!)
+    /// AtomicWaker uses pure atomic operations, no mutex needed
+    single: AtomicWaker,
 
     /// Slow path: multiple waiters
     multi: Mutex<VecDeque<Waker>>,
@@ -49,10 +62,40 @@ impl WaiterQueue {
     /// Create a new waiter queue
     pub fn new() -> Self {
         Self {
-            mode: AtomicU8::new(MODE_EMPTY),
-            single: Mutex::new(None),
+            mode: AtomicU8::new(Mode::Empty.into()),
+            single: AtomicWaker::new(),
             multi: Mutex::new(VecDeque::new()),
         }
+    }
+
+    /// Load the current mode
+    #[inline]
+    fn load_mode(&self, ordering: Ordering) -> Mode {
+        // SAFETY: Mode is repr(u8) with values 0,1,2 only
+        // The atomic ensures we only ever store valid Mode values
+        Mode::try_from(self.mode.load(ordering))
+            .expect("Invalid mode value in atomic")
+    }
+
+    /// Store a new mode
+    #[inline]
+    fn store_mode(&self, mode: Mode, ordering: Ordering) {
+        self.mode.store(mode.into(), ordering);
+    }
+
+    /// Compare-and-exchange the mode
+    #[inline]
+    fn compare_exchange_mode(
+        &self,
+        current: Mode,
+        new: Mode,
+        success: Ordering,
+        failure: Ordering,
+    ) -> Result<Mode, Mode> {
+        self.mode
+            .compare_exchange(current.into(), new.into(), success, failure)
+            .map(|v| Mode::try_from(v).expect("Invalid mode value in atomic"))
+            .map_err(|v| Mode::try_from(v).expect("Invalid mode value in atomic"))
     }
 
     /// Add a waiter to the queue if condition is false (atomic check-and-add)
@@ -70,91 +113,92 @@ impl WaiterQueue {
         F: Fn() -> bool,
     {
         // Try single-waiter fast path first
-        let mode = self.mode.load(Ordering::Acquire);
+        let mode = self.load_mode(Ordering::Acquire);
 
-        if mode == MODE_EMPTY {
+        if mode == Mode::Empty {
             // Try to transition EMPTY → SINGLE atomically
             if self
-                .mode
-                .compare_exchange(MODE_EMPTY, MODE_SINGLE, Ordering::AcqRel, Ordering::Acquire)
+                .compare_exchange_mode(
+                    Mode::Empty,
+                    Mode::Single,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
                 .is_ok()
             {
-                // Successfully claimed single slot
-                {
-                    let mut single = self.single.lock();
-
-                    // Check before registration
-                    if condition() {
-                        self.mode.store(MODE_EMPTY, Ordering::Release);
-                        return true;
-                    }
-
-                    // Register
-                    *single = Some(waker);
-
-                    // Re-check after registration to prevent lost wake
-                    if condition() {
-                        // Remove and reset mode
-                        let _ = single.take();
-                        self.mode.store(MODE_EMPTY, Ordering::Release);
-                        return true;
-                    }
-                    
-                    // CRITICAL: Ensure mode reflects single occupancy under the same lock
-                    // This prevents wake_one from flipping mode to EMPTY between our CAS and store
-                    self.mode.store(MODE_SINGLE, Ordering::Release);
+                // Successfully claimed single slot - use lock-free AtomicWaker!
+                
+                // Check before registration
+                if condition() {
+                    self.store_mode(Mode::Empty, Ordering::Release);
+                    return true;
                 }
-                return false; // pending
+
+                // Register with AtomicWaker (lock-free atomic operation!)
+                self.single.register(&waker);
+
+                // Re-check after registration to prevent lost wake
+                if condition() {
+                    // Take the waker back and reset mode
+                    self.single.take();
+                    self.store_mode(Mode::Empty, Ordering::Release);
+                    return true;
+                }
+                
+                // Successfully registered, pending
+                return false;
             }
         }
 
         // Multiple waiters or contention → use multi queue (and migrate single)
-        // Lock order: single → multi (matches wake_all) to avoid deadlocks.
-        let mut single = self.single.lock();
+        // Check condition before taking locks
         if condition() {
             return true;
         }
+        
         let mut waiters = self.multi.lock();
-        // Migrate single-slot waiter if present
-        if let Some(prev) = single.take() {
+        
+        // Migrate single-slot waiter if present (atomically take it)
+        if let Some(prev) = self.single.take() {
             waiters.push_back(prev);
         }
+        
         // Register this waiter
         waiters.push_back(waker);
+        
         // Re-check after registration to prevent lost wake
         if condition() {
             // Remove our own registration
             let _ = waiters.pop_back();
             // If nothing remains, update mode accordingly
             if waiters.is_empty() {
-                self.mode.store(MODE_EMPTY, Ordering::Release);
+                self.store_mode(Mode::Empty, Ordering::Release);
             } else {
-                self.mode.store(MODE_MULTI, Ordering::Release);
+                self.store_mode(Mode::Multi, Ordering::Release);
             }
             return true;
         }
-        self.mode.store(MODE_MULTI, Ordering::Release);
+        
+        self.store_mode(Mode::Multi, Ordering::Release);
         false
     }
 
     /// Wake one waiting task
     pub fn wake_one(&self) {
-        let mode = self.mode.load(Ordering::Acquire);
+        let mode = self.load_mode(Ordering::Acquire);
 
         match mode {
-            MODE_EMPTY => {
+            Mode::Empty => {
                 // No waiters, nothing to do
             }
-            MODE_SINGLE => {
-                // CRITICAL: Take from single first, then decide the next mode
-                // Don't CAS before locking to avoid racing with add_waiter_if
-                let waker = { self.single.lock().take() };
-                if let Some(w) = waker {
+            Mode::Single => {
+                // Lock-free atomic wake using AtomicWaker!
+                if let Some(w) = self.single.take() {
                     // Check if multi has waiters to decide next mode
                     let has_multi = { !self.multi.lock().is_empty() };
-                    self.mode.store(
-                        if has_multi { MODE_MULTI } else { MODE_EMPTY },
-                        Ordering::Release
+                    self.store_mode(
+                        if has_multi { Mode::Multi } else { Mode::Empty },
+                        Ordering::Release,
                     );
                     w.wake();
                 } else {
@@ -162,32 +206,31 @@ impl WaiterQueue {
                     if !self.wake_one_from_multi() {
                         // Both empty, check and update mode appropriately
                         let has_multi = { !self.multi.lock().is_empty() };
-                        self.mode.store(
-                            if has_multi { MODE_MULTI } else { MODE_EMPTY },
-                            Ordering::Release
+                        self.store_mode(
+                            if has_multi { Mode::Multi } else { Mode::Empty },
+                            Ordering::Release,
                         );
                     }
                 }
             }
-            MODE_MULTI => {
+            Mode::Multi => {
                 // Prefer multi; if empty, try single and update mode accordingly
                 if !self.wake_one_from_multi() {
-                    let w = { self.single.lock().take() };
-                    if let Some(w) = w {
+                    // Try single waiter (lock-free!)
+                    if let Some(w) = self.single.take() {
                         // Check if multi still has waiters for next mode
                         let has_multi = { !self.multi.lock().is_empty() };
-                        self.mode.store(
-                            if has_multi { MODE_MULTI } else { MODE_EMPTY },
-                            Ordering::Release
+                        self.store_mode(
+                            if has_multi { Mode::Multi } else { Mode::Empty },
+                            Ordering::Release,
                         );
                         w.wake();
                     } else {
                         // Both empty, reset mode
-                        self.mode.store(MODE_EMPTY, Ordering::Release);
+                        self.store_mode(Mode::Empty, Ordering::Release);
                     }
                 }
             }
-            _ => unreachable!("Invalid mode"),
         }
     }
 
@@ -211,14 +254,18 @@ impl WaiterQueue {
 
     /// Wake all waiting tasks
     pub fn wake_all(&self) {
-        // Drain both storages (lock order: single → multi)
-        let single_waker = { self.single.lock().take() };
+        // Drain both storages
+        // Single: lock-free atomic take
+        let single_waker = self.single.take();
+        
+        // Multi: lock and drain
         let multi_wakers = {
             let mut waiters = self.multi.lock();
             std::mem::take(&mut *waiters)
         };
+        
         // Reset mode after draining
-        self.mode.store(MODE_EMPTY, Ordering::Release);
+        self.store_mode(Mode::Empty, Ordering::Release);
 
         // Wake all outside lock
         if let Some(waker) = single_waker {
@@ -232,18 +279,27 @@ impl WaiterQueue {
 
     /// Get the number of waiting tasks (for debugging/stats)
     ///
-    /// Note: This locks both storages to get a consistent count,
-    /// preventing races with concurrent mode transitions.
+    /// Note: This provides a best-effort count that may be slightly
+    /// inaccurate during mode transitions. AtomicWaker doesn't expose
+    /// a way to check occupancy without taking the waker, so we use
+    /// the mode as a hint.
     pub fn waiter_count(&self) -> usize {
-        // Lock order: single → multi (consistent with elsewhere)
-        // This prevents TOCTOU races where mode changes between reads
-        let single = self.single.lock();
-        let multi = self.multi.lock();
+        let mode = self.load_mode(Ordering::Acquire);
+        let multi_count = self.multi.lock().len();
         
-        let single_count = if single.is_some() { 1 } else { 0 };
-        let multi_count = multi.len();
-        
-        single_count + multi_count
+        match mode {
+            Mode::Empty => multi_count, // Should be 0, but check multi just in case
+            Mode::Single => {
+                // Single waiter might exist, plus any in multi queue
+                // (during migration from single to multi, both might have waiters)
+                1 + multi_count
+            }
+            Mode::Multi => {
+                // Multi queue has waiters, single might have one during migration
+                // Be conservative and assume single might have one
+                multi_count.saturating_add(1)
+            }
+        }
     }
 }
 
@@ -310,7 +366,7 @@ mod tests {
     fn test_empty_queue() {
         let queue = WaiterQueue::new();
         assert_eq!(queue.waiter_count(), 0);
-        assert_eq!(queue.mode.load(Ordering::Relaxed), MODE_EMPTY);
+        assert_eq!(queue.load_mode(Ordering::Relaxed), Mode::Empty);
     }
 
     #[test]
