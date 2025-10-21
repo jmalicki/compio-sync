@@ -83,7 +83,7 @@ use std::task::{Context, Poll};
 /// ```
 pub struct Condvar {
     /// Internal state for the condition variable
-    /// Users should wrap in Arc<Condvar> when sharing between tasks
+    /// Users should wrap in `Arc<Condvar>` when sharing between tasks
     inner: CondvarInner,
 }
 
