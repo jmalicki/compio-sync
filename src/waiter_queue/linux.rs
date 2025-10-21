@@ -55,6 +55,9 @@ impl WaiterQueue {
     ///
     /// This is used by platform-specific Future implementations.
     /// Only available when using IoUring variant.
+    /// 
+    /// TODO: Integrate with Semaphore/Condvar futures for full io_uring usage
+    #[allow(dead_code)]
     #[cfg(target_os = "linux")]
     pub(crate) fn get_futex(&self) -> Option<Arc<AtomicU32>> {
         match self {
@@ -239,6 +242,9 @@ impl IoUringWaiterQueue {
     ///
     /// This is used by platform-specific Future implementations to create
     /// futex wait operations.
+    /// 
+    /// TODO: Integrate with Semaphore/Condvar futures for full io_uring usage
+    #[allow(dead_code)]
     pub(crate) fn get_futex(&self) -> Arc<AtomicU32> {
         Arc::clone(&self.futex)
     }
@@ -302,12 +308,21 @@ impl IoUringWaiterQueue {
     }
 }
 
+impl Default for IoUringWaiterQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Futex wait operation for io_uring
 ///
 /// Waits on a futex word until it changes or is explicitly woken.
 /// The waker is managed by compio's runtime when this operation is submitted.
 ///
 /// This is an internal implementation detail, not part of the public API.
+/// 
+/// TODO: Integrate with Semaphore/Condvar futures for full io_uring usage
+#[allow(dead_code)]
 #[cfg(target_os = "linux")]
 pub(crate) struct FutexWaitOp {
     /// Shared futex word to wait on
@@ -318,6 +333,7 @@ pub(crate) struct FutexWaitOp {
 
 impl FutexWaitOp {
     /// Create a new futex wait operation
+    #[allow(dead_code)]
     pub(crate) fn new(futex: Arc<AtomicU32>, expected: u32) -> Self {
         Self { futex, expected }
     }
