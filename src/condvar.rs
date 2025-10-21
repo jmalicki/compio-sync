@@ -329,6 +329,6 @@ mod tests {
     #[test]
     fn test_condvar_creation() {
         let cv = Condvar::new();
-        assert_eq!(cv.inner.notified.load(Ordering::Relaxed), false);
+        assert!(!cv.inner.notified.load(Ordering::Relaxed));
     }
 }
