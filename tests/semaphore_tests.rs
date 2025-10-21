@@ -4,6 +4,9 @@ use compio_sync::Semaphore;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Standard timeout for tests to prevent indefinite hangs
+const TEST_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[compio::test]
 async fn test_semaphore_basic_acquire_release() {
     compio::time::timeout(Duration::from_secs(5), async {
@@ -19,7 +22,7 @@ async fn test_semaphore_basic_acquire_release() {
 
 #[compio::test]
 async fn test_semaphore_concurrent_access() {
-    compio::time::timeout(Duration::from_secs(10), async {
+    compio::time::timeout(TEST_TIMEOUT, async {
         let sem = Arc::new(Semaphore::new(5));
         let mut handles = vec![];
 
@@ -135,7 +138,7 @@ async fn test_semaphore_single_permit() {
 
 #[compio::test]
 async fn test_semaphore_fairness() {
-    compio::time::timeout(Duration::from_secs(10), async {
+    compio::time::timeout(TEST_TIMEOUT, async {
         let sem = Arc::new(Semaphore::new(1));
         let order = Arc::new(std::sync::Mutex::new(Vec::new()));
 
@@ -175,7 +178,7 @@ async fn test_semaphore_fairness() {
 
 #[compio::test]
 async fn test_semaphore_stress() {
-    compio::time::timeout(Duration::from_secs(10), async {
+    compio::time::timeout(TEST_TIMEOUT, async {
         let sem = Arc::new(Semaphore::new(100));
         let mut handles = vec![];
 

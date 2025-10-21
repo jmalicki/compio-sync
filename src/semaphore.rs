@@ -405,23 +405,34 @@ impl<'a, W: WaiterQueueTrait> Future for AcquireFuture<'a, W> {
 
         // No permits - add ourselves to waiter queue (unconditionally)
         // We can't use add_waiter_if here because permits are checked separately
-        match self
-            .semaphore
-            .inner
-            .waiters
-            .poll_add_waiter_if(|| false, cx)
-        {
-            Poll::Ready(_added) => {
-                // Waker registered, try again before pending
-                if let Some(permit) = self.semaphore.try_acquire() {
-                    return Poll::Ready(permit);
-                }
-                // No permits available, wait for wakeup
-                Poll::Pending
+        loop {
+            // Retry fast path before attempting to register again
+            if let Some(permit) = self.semaphore.try_acquire() {
+                return Poll::Ready(permit);
             }
-            Poll::Pending => {
-                // Future itself is pending (e.g. io_uring submission)
-                Poll::Pending
+
+            match self
+                .semaphore
+                .inner
+                .waiters
+                .poll_add_waiter_if(|| false, cx)
+            {
+                Poll::Ready(true) => {
+                    // Condition shouldn't be true with `|| false`, but be robust.
+                    // Loop to retry acquire immediately.
+                    continue;
+                }
+                Poll::Ready(false) => {
+                    // Registered; try again before yielding.
+                    if let Some(permit) = self.semaphore.try_acquire() {
+                        return Poll::Ready(permit);
+                    }
+                    return Poll::Pending;
+                }
+                Poll::Pending => {
+                    // Platform impl is pending (e.g., io_uring submission)
+                    return Poll::Pending;
+                }
             }
         }
     }

@@ -107,15 +107,19 @@ impl WaiterQueue {
     /// - Adds waiter only if condition is false
     /// - Re-checks after registration to prevent lost wakeups
     ///
-    /// Returns Poll::Ready immediately for the generic implementation.
+    /// Returns `Poll::Ready` immediately (never `Poll::Pending`) for the generic implementation.
+    ///
+    /// Contract for callers:
+    /// - If this returns `Poll::Ready(false)`, you MUST return `Poll::Pending` from your poll
+    ///   to keep the current task alive; otherwise the stored `Waker` may target a completed future.
     ///
     /// Returns:
-    /// - `Poll::Ready(true)` if condition was true (ready immediately)
-    /// - `Poll::Ready(false)` if condition was false (waiter added, pending)
+    /// - `Poll::Ready(true)`: condition was true (do not register)
+    /// - `Poll::Ready(false)`: condition was false (waiter registered; caller should return `Pending`)
     pub fn poll_add_waiter_if<F>(
         &self,
         condition: F,
-        _cx: &mut std::task::Context<'_>,
+        cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<bool>
     where
         F: Fn() -> bool,
@@ -144,7 +148,7 @@ impl WaiterQueue {
                 }
 
                 // Register with AtomicWaker (lock-free atomic operation!)
-                self.single.register(_cx.waker());
+                self.single.register(cx.waker());
 
                 // Re-check after registration to prevent lost wake
                 if condition() {
@@ -173,7 +177,7 @@ impl WaiterQueue {
         }
 
         // Register this waiter
-        waiters.push_back(_cx.waker().clone());
+        waiters.push_back(cx.waker().clone());
 
         // Re-check after registration to prevent lost wake
         if condition() {
