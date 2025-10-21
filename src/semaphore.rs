@@ -405,20 +405,40 @@ impl<'a, W: WaiterQueueTrait> Future for AcquireFuture<'a, W> {
 
         // No permits - add ourselves to waiter queue (unconditionally)
         // We can't use add_waiter_if here because permits are checked separately
-        let _added = self
-            .semaphore
-            .inner
-            .waiters
-            .add_waiter_if(|| false, cx.waker().clone());
+        //
+        // Defensive loop: While the condition is hard-coded to `|| false`,
+        // the loop structure makes the code robust to future changes and
+        // handles the theoretical Poll::Ready(true) case gracefully.
+        loop {
+            // Retry fast path before attempting to register again
+            if let Some(permit) = self.semaphore.try_acquire() {
+                return Poll::Ready(permit);
+            }
 
-        // CRITICAL: Try again after registering
-        // Catches permits released during registration
-        if let Some(permit) = self.semaphore.try_acquire() {
-            return Poll::Ready(permit);
+            match self
+                .semaphore
+                .inner
+                .waiters
+                .poll_add_waiter_if(|| false, cx)
+            {
+                Poll::Ready(true) => {
+                    // Condition shouldn't be true with `|| false`, but be robust.
+                    // Loop to retry acquire immediately.
+                    continue;
+                }
+                Poll::Ready(false) => {
+                    // Registered; try again before yielding.
+                    if let Some(permit) = self.semaphore.try_acquire() {
+                        return Poll::Ready(permit);
+                    }
+                    return Poll::Pending;
+                }
+                Poll::Pending => {
+                    // Platform impl is pending (e.g., io_uring submission)
+                    return Poll::Pending;
+                }
+            }
         }
-
-        // No permits available, wait for wakeup
-        Poll::Pending
     }
 }
 

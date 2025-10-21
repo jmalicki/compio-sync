@@ -1,64 +1,12 @@
-//! Linux-specific waiter queue implementation using io_uring futex operations
+//! Linux-specific waiter queue implementation
 //!
-//! This implementation provides a unified event loop on Linux by submitting
-//! futex operations to io_uring, allowing both I/O and synchronization to be
-//! handled through the same completion queue.
+//! Phase 2 TODO: Will use io_uring futex operations for unified event loop
+//! Phase 2 will add:
+//! - io_uring futex operations (kernel 6.7+)
+//! - Unified event loop (I/O + sync through io_uring)
+//! - Runtime kernel detection with graceful fallback
 //!
-//! Requirements:
-//! - Linux kernel 6.7+ (for IORING_OP_FUTEX_WAIT/WAKE)
-//! - compio runtime with io_uring support
-//!
-//! Fallback: If requirements not met, falls back to generic implementation
+//! For now, re-exports the generic implementation (AtomicWaker + parking_lot).
 
-// TODO: Phase 2 implementation
-// For now, re-export generic implementation
-
+// Phase 2: Re-export generic for now
 pub use super::generic::WaiterQueue;
-
-// Future implementation will look like:
-/*
-use std::sync::Arc;
-use std::task::Waker;
-
-pub struct WaiterQueue {
-    /// Handle to compio's io_uring instance
-    uring: Arc<UringHandle>,
-}
-
-impl WaiterQueue {
-    pub fn new() -> Self {
-        // Try to get io_uring handle from compio
-        // If unavailable or kernel too old, fall back to generic
-        todo!("Phase 2: Implement io_uring futex integration")
-    }
-
-    pub fn add_waiter_if<F>(&self, condition: F, waker: Waker) -> bool
-    where
-        F: FnOnce() -> bool,
-    {
-        // Fast path: try atomic CAS
-        if condition() {
-            return true;
-        }
-
-        // Slow path: submit IORING_OP_FUTEX_WAIT to io_uring
-        todo!("Phase 2: Submit futex wait to io_uring")
-    }
-
-    pub fn wake_one(&self) {
-        // Submit IORING_OP_FUTEX_WAKE to io_uring
-        todo!("Phase 2: Submit futex wake to io_uring")
-    }
-
-    pub fn wake_all(&self) {
-        // Submit IORING_OP_FUTEX_WAKE with INT_MAX count
-        todo!("Phase 2: Submit futex wake_all to io_uring")
-    }
-
-    pub fn waiter_count(&self) -> usize {
-        // For io_uring implementation, we don't track count
-        // (kernel manages waiters)
-        0
-    }
-}
-*/
