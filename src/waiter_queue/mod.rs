@@ -37,7 +37,6 @@ use std::task::Waker;
 ///
 /// This trait defines the interface that all platform-specific waiter queue
 /// implementations must satisfy.
-#[allow(dead_code)]
 pub trait WaiterQueueTrait {
     /// Create a new waiter queue
     fn new() -> Self;

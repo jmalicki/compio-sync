@@ -13,6 +13,8 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::task::Waker;
 
+use super::WaiterQueueTrait;
+
 // TODO: Decide between parking_lot or crossbeam after benchmarking
 // For now, using parking_lot as it's simpler and proven
 
@@ -240,6 +242,31 @@ impl WaiterQueue {
 impl Default for WaiterQueue {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl WaiterQueueTrait for WaiterQueue {
+    fn new() -> Self {
+        WaiterQueue::new()
+    }
+
+    fn add_waiter_if<F>(&self, condition: F, waker: Waker) -> bool
+    where
+        F: Fn() -> bool,
+    {
+        WaiterQueue::add_waiter_if(self, condition, waker)
+    }
+
+    fn wake_one(&self) {
+        WaiterQueue::wake_one(self)
+    }
+
+    fn wake_all(&self) {
+        WaiterQueue::wake_all(self)
+    }
+
+    fn waiter_count(&self) -> usize {
+        WaiterQueue::waiter_count(self)
     }
 }
 
