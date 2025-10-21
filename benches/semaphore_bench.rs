@@ -2,8 +2,8 @@
 //!
 //! Measures baseline performance for different contention scenarios.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
 use compio_sync::Semaphore;
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::sync::Arc;
 
 fn bench_uncontended_try_acquire(c: &mut Criterion) {
@@ -30,7 +30,7 @@ fn bench_uncontended_acquire(c: &mut Criterion) {
 
 fn bench_contended_varying_concurrency(c: &mut Criterion) {
     let mut group = c.benchmark_group("semaphore/contended");
-    
+
     for concurrency in [2, 4, 8, 16, 32, 64].iter() {
         group.bench_with_input(
             BenchmarkId::from_parameter(concurrency),
@@ -40,7 +40,7 @@ fn bench_contended_varying_concurrency(c: &mut Criterion) {
                     compio::runtime::Runtime::new().unwrap().block_on(async {
                         let sem = Arc::new(Semaphore::new(4));
                         let mut handles = vec![];
-                        
+
                         for _ in 0..concurrency {
                             let sem = sem.clone();
                             handles.push(compio::runtime::spawn(async move {
@@ -48,7 +48,7 @@ fn bench_contended_varying_concurrency(c: &mut Criterion) {
                                 black_box(42);
                             }));
                         }
-                        
+
                         for h in handles {
                             h.await.unwrap();
                         }
@@ -57,7 +57,7 @@ fn bench_contended_varying_concurrency(c: &mut Criterion) {
             },
         );
     }
-    
+
     group.finish();
 }
 
@@ -81,7 +81,7 @@ fn bench_high_permits_low_contention(c: &mut Criterion) {
             compio::runtime::Runtime::new().unwrap().block_on(async {
                 let sem = Arc::new(Semaphore::new(1000));
                 let mut handles = vec![];
-                
+
                 // Only 100 concurrent acquires on 1000 permits
                 for _ in 0..100 {
                     let sem = sem.clone();
@@ -90,7 +90,7 @@ fn bench_high_permits_low_contention(c: &mut Criterion) {
                         black_box(42);
                     }));
                 }
-                
+
                 for h in handles {
                     h.await.unwrap();
                 }
@@ -108,4 +108,3 @@ criterion_group!(
     bench_high_permits_low_contention
 );
 criterion_main!(benches);
-

@@ -118,4 +118,3 @@ mod tests {
         queue.wake_all();
     }
 }
-

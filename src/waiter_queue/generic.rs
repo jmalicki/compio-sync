@@ -65,19 +65,18 @@ impl WaiterQueue {
     {
         // Try single-waiter fast path first
         let mode = self.mode.load(Ordering::Acquire);
-        
+
         if mode == MODE_EMPTY {
             // Try to transition EMPTY → SINGLE atomically
-            if self.mode.compare_exchange(
-                MODE_EMPTY,
-                MODE_SINGLE,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ).is_ok() {
+            if self
+                .mode
+                .compare_exchange(MODE_EMPTY, MODE_SINGLE, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
                 // Successfully claimed single slot
                 {
                     let mut single = self.single.lock();
-                    
+
                     // CRITICAL: Check condition inside lock
                     if condition() {
                         // Condition met - don't wait
@@ -85,18 +84,18 @@ impl WaiterQueue {
                         self.mode.store(MODE_EMPTY, Ordering::Release);
                         return true;
                     }
-                    
+
                     // Store waker
                     *single = Some(waker);
                 }
-                
+
                 return false; // Pending
             }
         }
 
         // Multiple waiters or contention → use multi queue
         let mut waiters = self.multi.lock();
-        
+
         // CRITICAL: Check condition inside lock
         if condition() {
             // Condition met - don't wait
@@ -106,7 +105,7 @@ impl WaiterQueue {
         // Add to multi queue
         waiters.push_back(waker);
         self.mode.store(MODE_MULTI, Ordering::Release);
-        
+
         false // Pending
     }
 
@@ -120,18 +119,17 @@ impl WaiterQueue {
             }
             MODE_SINGLE => {
                 // Try to wake single waiter
-                if self.mode.compare_exchange(
-                    MODE_SINGLE,
-                    MODE_EMPTY,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                ).is_ok() {
+                if self
+                    .mode
+                    .compare_exchange(MODE_SINGLE, MODE_EMPTY, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
                     // Successfully transitioned to EMPTY
                     let waker = {
                         let mut single = self.single.lock();
                         single.take()
                     };
-                    
+
                     // Wake outside lock
                     if let Some(waker) = waker {
                         waker.wake();
@@ -155,7 +153,7 @@ impl WaiterQueue {
         let waker = {
             let mut waiters = self.multi.lock();
             let waker = waiters.pop_front();
-            
+
             // If queue is now empty, check if we should reset mode
             if waiters.is_empty() {
                 // Try to transition to EMPTY
@@ -168,7 +166,7 @@ impl WaiterQueue {
                     Ordering::Acquire,
                 );
             }
-            
+
             waker
         };
 
@@ -193,10 +191,10 @@ impl WaiterQueue {
             // Take all from multi queue
             let mut waiters = self.multi.lock();
             let multi_wakers = std::mem::take(&mut *waiters);
-            
+
             // Reset mode to EMPTY
             self.mode.store(MODE_EMPTY, Ordering::Release);
-            
+
             (single_waker, multi_wakers)
         };
 
@@ -204,7 +202,7 @@ impl WaiterQueue {
         if let Some(waker) = wakers.0 {
             waker.wake();
         }
-        
+
         for waker in wakers.1 {
             waker.wake();
         }
@@ -213,12 +211,16 @@ impl WaiterQueue {
     /// Get the number of waiting tasks (for debugging/stats)
     pub fn waiter_count(&self) -> usize {
         let mode = self.mode.load(Ordering::Acquire);
-        
+
         match mode {
             MODE_EMPTY => 0,
             MODE_SINGLE => {
                 let single = self.single.lock();
-                if single.is_some() { 1 } else { 0 }
+                if single.is_some() {
+                    1
+                } else {
+                    0
+                }
             }
             MODE_MULTI => {
                 let waiters = self.multi.lock();
@@ -264,12 +266,12 @@ mod tests {
     #[test]
     fn test_single_waiter() {
         let queue = WaiterQueue::new();
-        
+
         // Add single waiter
         let result = queue.add_waiter_if(|| false, dummy_waker());
         assert!(!result);
         assert_eq!(queue.waiter_count(), 1);
-        
+
         // Wake it
         queue.wake_one();
         assert_eq!(queue.waiter_count(), 0);
@@ -278,36 +280,43 @@ mod tests {
     #[test]
     fn test_multiple_waiters() {
         let queue = WaiterQueue::new();
-        
+
         // Add multiple waiters
         queue.add_waiter_if(|| false, dummy_waker());
         queue.add_waiter_if(|| false, dummy_waker());
         queue.add_waiter_if(|| false, dummy_waker());
-        
+
         let count = queue.waiter_count();
         assert!(count >= 1, "Should have at least 1 waiter, got {}", count);
-        
+
         // Wake one
         queue.wake_one();
-        
+
         // Should have fewer waiters now
         let count_after_wake_one = queue.waiter_count();
-        assert!(count_after_wake_one < count, "Should have fewer waiters after wake_one");
-        
+        assert!(
+            count_after_wake_one < count,
+            "Should have fewer waiters after wake_one"
+        );
+
         // Wake all
         queue.wake_all();
-        assert_eq!(queue.waiter_count(), 0, "Should have no waiters after wake_all");
+        assert_eq!(
+            queue.waiter_count(),
+            0,
+            "Should have no waiters after wake_all"
+        );
     }
 
     #[test]
     fn test_condition_check() {
         let queue = WaiterQueue::new();
-        
+
         // Condition true - should not add
         let result = queue.add_waiter_if(|| true, dummy_waker());
         assert!(result);
         assert_eq!(queue.waiter_count(), 0);
-        
+
         // Condition false - should add
         let result = queue.add_waiter_if(|| false, dummy_waker());
         assert!(!result);
@@ -322,4 +331,3 @@ mod tests {
         assert_eq!(queue.waiter_count(), 0);
     }
 }
-

@@ -59,10 +59,10 @@ async fn test_rapid_acquire_release() {
 #[compio::test]
 async fn test_many_waiters_wake_order() {
     let sem = Arc::new(Semaphore::new(1));
-    
+
     // Acquire the only permit
     let permit = sem.acquire().await;
-    
+
     // Spawn many waiters
     let mut handles = vec![];
     for i in 0..100 {
@@ -72,16 +72,16 @@ async fn test_many_waiters_wake_order() {
             i
         }));
     }
-    
+
     // Release permit - waiters should wake in order
     drop(permit);
-    
+
     // All should eventually complete
     let mut results = vec![];
     for h in handles {
         results.push(h.await.unwrap());
     }
-    
+
     assert_eq!(results.len(), 100);
 }
 
@@ -115,10 +115,10 @@ async fn test_semaphore_under_load_mixed_operations() {
 #[compio::test]
 async fn test_future_cancellation_stress() {
     let sem = Arc::new(Semaphore::new(1));
-    
+
     // Hold the permit
     let _permit = sem.acquire().await;
-    
+
     // Start many futures but drop them
     for _ in 0..100 {
         let sem = sem.clone();
@@ -128,9 +128,8 @@ async fn test_future_cancellation_stress() {
         // Drop immediately (cancel)
         drop(fut);
     }
-    
+
     // Semaphore should still work
     drop(_permit);
     let _p2 = sem.acquire().await;
 }
-
