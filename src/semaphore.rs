@@ -405,6 +405,10 @@ impl<'a, W: WaiterQueueTrait> Future for AcquireFuture<'a, W> {
 
         // No permits - add ourselves to waiter queue (unconditionally)
         // We can't use add_waiter_if here because permits are checked separately
+        //
+        // Defensive loop: While the condition is hard-coded to `|| false`,
+        // the loop structure makes the code robust to future changes and
+        // handles the theoretical Poll::Ready(true) case gracefully.
         loop {
             // Retry fast path before attempting to register again
             if let Some(permit) = self.semaphore.try_acquire() {
