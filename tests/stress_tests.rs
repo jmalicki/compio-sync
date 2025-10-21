@@ -79,7 +79,7 @@ async fn test_rapid_acquire_release() {
 }
 
 #[compio::test]
-async fn test_many_waiters_wake_order() {
+async fn test_many_waiters_all_complete() {
     let result = compio::time::timeout(STRESS_TEST_TIMEOUT, async {
         let sem = Arc::new(Semaphore::new(1));
 
@@ -96,7 +96,8 @@ async fn test_many_waiters_wake_order() {
             }));
         }
 
-        // Release permit - waiters should wake in order
+        // Release permit - waiters should eventually complete
+        // Note: This test does not verify FIFO ordering, only completion
         drop(permit);
 
         // All should eventually complete

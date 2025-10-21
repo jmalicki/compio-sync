@@ -99,6 +99,10 @@ impl WaiterQueue {
                         self.mode.store(MODE_EMPTY, Ordering::Release);
                         return true;
                     }
+                    
+                    // CRITICAL: Ensure mode reflects single occupancy under the same lock
+                    // This prevents wake_one from flipping mode to EMPTY between our CAS and store
+                    self.mode.store(MODE_SINGLE, Ordering::Release);
                 }
                 return false; // pending
             }
@@ -142,33 +146,40 @@ impl WaiterQueue {
                 // No waiters, nothing to do
             }
             MODE_SINGLE => {
-                // Try to wake single waiter
-                if self
-                    .mode
-                    .compare_exchange(MODE_SINGLE, MODE_EMPTY, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-                {
-                    // Successfully transitioned to EMPTY
-                    let waker = {
-                        let mut single = self.single.lock();
-                        single.take()
-                    };
-
-                    // Wake outside lock
-                    if let Some(waker) = waker {
-                        waker.wake();
-                    }
+                // CRITICAL: Take from single first, then decide the next mode
+                // Don't CAS before locking to avoid racing with add_waiter_if
+                let waker = { self.single.lock().take() };
+                if let Some(w) = waker {
+                    // Check if multi has waiters to decide next mode
+                    let has_multi = { !self.multi.lock().is_empty() };
+                    self.mode.store(
+                        if has_multi { MODE_MULTI } else { MODE_EMPTY },
+                        Ordering::Release
+                    );
+                    w.wake();
                 } else {
-                    // Raced with another waiter being added
-                    // Fall through to multi queue
-                    self.wake_one_from_multi();
+                    // Nothing in single (registration race) → try multi, then fix mode
+                    if !self.wake_one_from_multi() {
+                        // Both empty, check and update mode appropriately
+                        let has_multi = { !self.multi.lock().is_empty() };
+                        self.mode.store(
+                            if has_multi { MODE_MULTI } else { MODE_EMPTY },
+                            Ordering::Release
+                        );
+                    }
                 }
             }
             MODE_MULTI => {
-                // Prefer multi; if empty, also try single
+                // Prefer multi; if empty, try single and update mode accordingly
                 if !self.wake_one_from_multi() {
                     let w = { self.single.lock().take() };
                     if let Some(w) = w {
+                        // Check if multi still has waiters for next mode
+                        let has_multi = { !self.multi.lock().is_empty() };
+                        self.mode.store(
+                            if has_multi { MODE_MULTI } else { MODE_EMPTY },
+                            Ordering::Release
+                        );
                         w.wake();
                     } else {
                         // Both empty, reset mode
