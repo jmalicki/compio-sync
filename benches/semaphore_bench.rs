@@ -18,11 +18,12 @@ fn bench_uncontended_try_acquire(c: &mut Criterion) {
 
 fn bench_uncontended_acquire(c: &mut Criterion) {
     c.bench_function("semaphore/uncontended/acquire", |b| {
-        let rt = compio::runtime::Runtime::new().unwrap();
-        let sem = Semaphore::new(100);
-        b.to_async(&rt).iter(|| async {
-            let p = sem.acquire().await;
-            black_box(p);
+        b.iter(|| {
+            compio::runtime::Runtime::new().unwrap().block_on(async {
+                let sem = Semaphore::new(100);
+                let p = sem.acquire().await;
+                black_box(p);
+            });
         });
     });
 }
@@ -35,22 +36,23 @@ fn bench_contended_varying_concurrency(c: &mut Criterion) {
             BenchmarkId::from_parameter(concurrency),
             concurrency,
             |b, &concurrency| {
-                let rt = compio::runtime::Runtime::new().unwrap();
-                b.to_async(&rt).iter(|| async {
-                    let sem = Arc::new(Semaphore::new(4));
-                    let mut handles = vec![];
-                    
-                    for _ in 0..concurrency {
-                        let sem = sem.clone();
-                        handles.push(compio::runtime::spawn(async move {
-                            let _p = sem.acquire().await;
-                            black_box(42);
-                        }));
-                    }
-                    
-                    for h in handles {
-                        h.await.unwrap();
-                    }
+                b.iter(|| {
+                    compio::runtime::Runtime::new().unwrap().block_on(async {
+                        let sem = Arc::new(Semaphore::new(4));
+                        let mut handles = vec![];
+                        
+                        for _ in 0..concurrency {
+                            let sem = sem.clone();
+                            handles.push(compio::runtime::spawn(async move {
+                                let _p = sem.acquire().await;
+                                black_box(42);
+                            }));
+                        }
+                        
+                        for h in handles {
+                            h.await.unwrap();
+                        }
+                    });
                 });
             },
         );
@@ -61,36 +63,38 @@ fn bench_contended_varying_concurrency(c: &mut Criterion) {
 
 fn bench_acquire_release_cycles(c: &mut Criterion) {
     c.bench_function("semaphore/cycles/1000_iterations", |b| {
-        let rt = compio::runtime::Runtime::new().unwrap();
-        let sem = Semaphore::new(1);
-        b.to_async(&rt).iter(|| async {
-            for _ in 0..1000 {
-                let p = sem.acquire().await;
-                drop(p);
-            }
+        b.iter(|| {
+            compio::runtime::Runtime::new().unwrap().block_on(async {
+                let sem = Semaphore::new(1);
+                for _ in 0..1000 {
+                    let p = sem.acquire().await;
+                    drop(p);
+                }
+            });
         });
     });
 }
 
 fn bench_high_permits_low_contention(c: &mut Criterion) {
     c.bench_function("semaphore/high_permits/acquire_100_of_1000", |b| {
-        let rt = compio::runtime::Runtime::new().unwrap();
-        b.to_async(&rt).iter(|| async {
-            let sem = Arc::new(Semaphore::new(1000));
-            let mut handles = vec![];
-            
-            // Only 100 concurrent acquires on 1000 permits
-            for _ in 0..100 {
-                let sem = sem.clone();
-                handles.push(compio::runtime::spawn(async move {
-                    let _p = sem.acquire().await;
-                    black_box(42);
-                }));
-            }
-            
-            for h in handles {
-                h.await.unwrap();
-            }
+        b.iter(|| {
+            compio::runtime::Runtime::new().unwrap().block_on(async {
+                let sem = Arc::new(Semaphore::new(1000));
+                let mut handles = vec![];
+                
+                // Only 100 concurrent acquires on 1000 permits
+                for _ in 0..100 {
+                    let sem = sem.clone();
+                    handles.push(compio::runtime::spawn(async move {
+                        let _p = sem.acquire().await;
+                        black_box(42);
+                    }));
+                }
+                
+                for h in handles {
+                    h.await.unwrap();
+                }
+            });
         });
     });
 }

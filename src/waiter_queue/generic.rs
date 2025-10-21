@@ -117,7 +117,6 @@ impl WaiterQueue {
         match mode {
             MODE_EMPTY => {
                 // No waiters, nothing to do
-                return;
             }
             MODE_SINGLE => {
                 // Try to wake single waiter

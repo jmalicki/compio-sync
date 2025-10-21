@@ -37,6 +37,7 @@ use std::task::Waker;
 ///
 /// This trait defines the interface that all platform-specific waiter queue
 /// implementations must satisfy.
+#[allow(dead_code)]
 pub trait WaiterQueueTrait {
     /// Create a new waiter queue
     fn new() -> Self;
@@ -65,7 +66,7 @@ pub trait WaiterQueueTrait {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use std::task::{Context, RawWaker, RawWakerVTable, Wake};
+    use std::task::Wake;
 
     // Helper to create a dummy waker for testing
     struct DummyWaker;
