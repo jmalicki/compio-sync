@@ -1,15 +1,18 @@
 //! Generic cross-platform waiter queue implementation
 //!
-//! **Phase 1 Implementation**: Uses parking_lot's optimized mutex with a hybrid approach:
-//! - Single-waiter fast path with atomic mode switching
-//! - Multi-waiter path using parking_lot::Mutex + VecDeque
+//! **Phase 1 Implementation**: Lock-free single-waiter optimization + parking_lot for multi-waiter:
+//! - Single-waiter fast path: AtomicWaker (lock-free atomic operations!)
+//! - Multi-waiter slow path: parking_lot::Mutex + VecDeque (2-5x faster than std::Mutex)
+//! - Atomic mode state machine: Empty → Single → Multi
 //!
-//! **Future Phases**: Phase 2 will add lock-free queue (crossbeam-queue) for generic,
-//! io_uring for Linux, and IOCP for Windows.
+//! **Future Phases**: Phase 2 will add platform-specific optimizations:
+//! - Linux: io_uring futex operations
+//! - Windows: IOCP integration
+//! - Generic: Potentially crossbeam-queue
 //!
 //! Performance characteristics:
-//! - Fast path (uncontended): Userspace atomic CAS (~nanoseconds)
-//! - Slow path (contended): Fast parking_lot mutex (2-5x faster than std::Mutex)
+//! - Single waiter (common case): Lock-free atomic operations (~nanoseconds, zero mutex overhead)
+//! - Multiple waiters: Fast parking_lot mutex (2-5x faster than std::Mutex)
 //! - No kernel involvement except waker.wake() which goes to the runtime
 
 use std::collections::VecDeque;

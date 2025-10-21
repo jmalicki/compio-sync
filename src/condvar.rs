@@ -225,8 +225,9 @@ impl<W: WaiterQueueTrait> CondvarGeneric<W> {
     /// # }
     /// ```
     pub fn clear(&self) {
-        // Relaxed ordering is fine - this is just a reset, no synchronization needed
-        self.inner.notified.store(false, Ordering::Relaxed);
+        // Use Release ordering to ensure threads don't observe stale 'true' after clear
+        // Pairs with Acquire loads in wait()
+        self.inner.notified.store(false, Ordering::Release);
     }
 
     /// Get the number of tasks waiting on this condvar
