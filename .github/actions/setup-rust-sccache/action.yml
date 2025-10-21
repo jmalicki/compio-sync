@@ -26,22 +26,32 @@ runs:
     - name: Setup sccache
       uses: mozilla-actions/sccache-action@v0.0.7
     
-    # Enhanced caching strategy
+    # Enhanced caching strategy for Cargo dependencies
+    # This shares cache across all jobs in the workflow
     - name: Cache Rust dependencies and build artifacts
       uses: Swatinem/rust-cache@v2
       with:
+        # Shared prefix for all compio-sync builds
         prefix-key: "v1-compio-sync"
-        shared-key: "${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}"
+        # Share cache across same OS and Cargo.lock
+        shared-key: "${{ runner.os }}-${{ inputs.toolchain }}"
+        # Enable comprehensive caching
         cache-all-crates: "true"
-        save-if: ${{ github.ref == 'refs/heads/main' }}
+        # Save cache from all branches to maximize reuse
+        save-if: "true"
+        # Cache workspace target directory for cross-job reuse
+        workspaces: "."
     
-    # Cache sccache artifacts
+    # Cache sccache compilation artifacts
+    # This is the key cache that speeds up compilation across jobs
     - name: Cache sccache artifacts
       uses: actions/cache@v4
       with:
         path: |
           ~/.cache/sccache
-        key: sccache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+        # Key by OS, toolchain, and Cargo.lock for precise matching
+        key: sccache-${{ runner.os }}-${{ inputs.toolchain }}-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
+          sccache-${{ runner.os }}-${{ inputs.toolchain }}-
           sccache-${{ runner.os }}-
 
