@@ -13,7 +13,6 @@
 use super::generic::WaiterQueue as GenericWaiterQueue;
 use std::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::task::Waker;
 
 #[cfg(target_os = "linux")]
 use compio_driver::{OpCode, OpEntry};
@@ -147,14 +146,7 @@ impl super::WaiterQueueTrait for WaiterQueue {
 /// Uses io_uring's probe mechanism to detect support for FUTEX_WAIT and FUTEX_WAKE.
 /// Result is cached globally using a lock-free atomic state machine.
 /// We only probe once per process.
-///
-/// TODO: Currently disabled - always returns false to use Generic implementation
-/// until full async trait integration is complete and tested.
 fn supports_io_uring_futex() -> bool {
-    // DISABLED: Always use Generic for now
-    false
-
-    /* Full implementation (disabled):
     // Check cached result first (fast path - lock-free atomic load)
     match FUTEX_SUPPORT.load(Ordering::Acquire) {
         FUTEX_SUPPORTED => return true,
@@ -179,42 +171,30 @@ fn supports_io_uring_futex() -> bool {
     FUTEX_SUPPORT.store(result, Ordering::Release);
 
     supported
-    */
 }
 
 /// Probe io_uring for futex operation support
 ///
 /// Creates a temporary io_uring instance and checks if FUTEX_WAIT/WAKE are available.
-///
-/// TODO: Currently returns false to always use Generic implementation.
-/// The io_uring infrastructure is complete but disabled pending full async integration testing.
-/// Enable by changing this to run the actual probe code.
 fn probe_futex_support() -> bool {
-    // TODO: Enable io_uring futex once async integration is fully tested
-    // For now, always use Generic (AtomicWaker) implementation
-    return false;
+    // Try to create io_uring instance
+    let ring = match io_uring::IoUring::new(2) {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
 
-    #[allow(unreachable_code)]
-    {
-        // Try to create io_uring instance
-        let ring = match io_uring::IoUring::new(2) {
-            Ok(r) => r,
-            Err(_) => return false,
-        };
+    // Create and register probe
+    let mut probe = io_uring::Probe::new();
 
-        // Create and register probe
-        let mut probe = io_uring::Probe::new();
-
-        if ring.submitter().register_probe(&mut probe).is_err() {
-            return false;
-        }
-
-        // Check if FUTEX_WAIT and FUTEX_WAKE opcodes are supported
-        let has_wait = probe.is_supported(io_uring::opcode::FutexWait::CODE);
-        let has_wake = probe.is_supported(io_uring::opcode::FutexWake::CODE);
-
-        has_wait && has_wake
+    if ring.submitter().register_probe(&mut probe).is_err() {
+        return false;
     }
+
+    // Check if FUTEX_WAIT and FUTEX_WAKE opcodes are supported
+    let has_wait = probe.is_supported(io_uring::opcode::FutexWait::CODE);
+    let has_wake = probe.is_supported(io_uring::opcode::FutexWake::CODE);
+
+    has_wait && has_wake
 }
 
 /// io_uring-based waiter queue implementation
@@ -232,7 +212,8 @@ pub struct IoUringWaiterQueue {
     futex: Arc<AtomicU32>,
 
     /// Waiter count (approximate, for debugging)
-    waiter_count: AtomicUsize,
+    /// Wrapped in Arc to allow sharing with spawned tasks
+    waiter_count: Arc<AtomicUsize>,
 }
 
 /// Submit futex wake operation
@@ -278,7 +259,7 @@ impl IoUringWaiterQueue {
     pub fn new() -> Self {
         Self {
             futex: Arc::new(AtomicU32::new(0)),
-            waiter_count: AtomicUsize::new(0),
+            waiter_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -295,9 +276,8 @@ impl IoUringWaiterQueue {
 
     /// Add a waiter if condition is false
     ///
-    /// TODO: Full io_uring implementation requires stateful Future to poll submit().
-    /// For now, this is infrastructure-only and disabled via probe.
-    #[allow(unused_variables)]
+    /// For io_uring, spawns a background task that waits on the futex
+    /// and wakes the original task when the futex changes.
     pub fn poll_add_waiter_if<F>(
         &self,
         condition: F,
@@ -307,19 +287,13 @@ impl IoUringWaiterQueue {
         F: Fn() -> bool,
     {
         use std::task::Poll;
-        
+
         // FAST PATH: Check condition first (pure userspace)
         if condition() {
             return Poll::Ready(true);
         }
 
-        // TODO: Full implementation would:
-        // 1. Create FutexWaitOp future
-        // 2. Store it in a field (requires state)
-        // 3. Poll it until complete
-        // 4. Return Poll::Pending until futex wakes
-        //
-        // For now, just track count for infrastructure testing
+        // Track waiter
         self.waiter_count.fetch_add(1, Ordering::Relaxed);
 
         // Post-registration recheck
@@ -328,7 +302,27 @@ impl IoUringWaiterQueue {
             return Poll::Ready(true);
         }
 
-        Poll::Ready(false) // Infrastructure - waiter added but not actually waiting
+        // Spawn background task to wait on futex
+        // This keeps the future alive and allows the waker to be called
+        let current_value = self.futex.load(Ordering::Acquire);
+        let op = FutexWaitOp::new(Arc::clone(&self.futex), current_value);
+        let waker = cx.waker().clone();
+        let waiter_count = self.waiter_count.clone();
+
+        let _handle = compio::runtime::spawn(async move {
+            // Wait for futex to change
+            let _ = compio::runtime::submit(op).await;
+
+            // Decrement waiter count
+            let _ = waiter_count
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| c.checked_sub(1));
+
+            // Wake the original task
+            waker.wake();
+        });
+
+        // Return false to indicate waiter is pending
+        Poll::Ready(false)
     }
 
     /// Wake one waiting task
