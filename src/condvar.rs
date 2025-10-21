@@ -83,7 +83,7 @@ use std::task::{Context, Poll};
 /// ```
 pub struct Condvar {
     /// Internal state for the condition variable
-    /// Users should wrap in Arc<Condvar> when sharing between tasks
+    /// Users should wrap in `Arc<Condvar>` when sharing between tasks
     inner: CondvarInner,
 }
 
@@ -329,6 +329,6 @@ mod tests {
     #[test]
     fn test_condvar_creation() {
         let cv = Condvar::new();
-        assert_eq!(cv.inner.notified.load(Ordering::Relaxed), false);
+        assert!(!cv.inner.notified.load(Ordering::Relaxed));
     }
 }

@@ -6,50 +6,121 @@ on:
   pull_request:
     branches: [ main ]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
 
 jobs:
-  test:
-    name: Test
+  # Phase 1: Fast checks that run in parallel (non-blocking)
+  code-quality:
+    name: Code Quality (Lint & Format)
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        rust: [stable]
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       
-      - uses: actions-rs/toolchain@v1
+      - name: Setup Rust with sccache
+        uses: ./.github/actions/setup-rust-sccache
         with:
-          toolchain: ${{ matrix.rust }}
-          override: true
+          toolchain: stable
           components: rustfmt, clippy
       
-      - name: Build
-        run: cargo build --verbose --all-features
+      # Check formatting first (fastest check)
+      - name: Check formatting
+        run: cargo fmt --all -- --check
       
-      - name: Run tests
-        run: cargo test --verbose --all-features
+      # Run clippy (uses sccache for compilation)
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
       
-      - name: Clippy
-        run: cargo clippy --all-features -- -D warnings
-        if: matrix.rust == 'stable'
-      
-      - name: Format check
-        run: cargo fmt -- --check
-        if: matrix.rust == 'stable'
+      - name: Show sccache statistics
+        run: sccache --show-stats
+        if: always()
 
+  # Phase 1 (parallel): Documentation - runs early but doesn't block pipeline
   docs:
     name: Documentation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       
-      - uses: actions-rs/toolchain@v1
+      - name: Setup Rust with sccache
+        uses: ./.github/actions/setup-rust-sccache
         with:
           toolchain: stable
-          override: true
       
-      - name: Build docs
+      - name: Build documentation
         run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+      
+      - name: Show sccache statistics
+        run: sccache --show-stats
+        if: always()
+
+  # Phase 2: Build on different platforms/toolchains
+  build:
+    name: Build (${{ matrix.os }}, ${{ matrix.rust }})
+    runs-on: ${{ matrix.os }}
+    needs: code-quality
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        rust: [stable, nightly]
+        # Future: add windows-latest, macos-latest when platform-specific code is ready
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Rust with sccache
+        uses: ./.github/actions/setup-rust-sccache
+        with:
+          toolchain: ${{ matrix.rust }}
+      
+      - name: Build library
+        run: cargo build --verbose --all-features
+      
+      - name: Build tests
+        run: cargo build --tests --verbose --all-features
+      
+      - name: Build benches
+        run: cargo build --benches --verbose --all-features
+        if: matrix.rust == 'stable'
+      
+      - name: Show sccache statistics
+        run: sccache --show-stats
+        if: always()
+
+  # Phase 3: Run tests (uses cached builds from previous phase)
+  test:
+    name: Test (${{ matrix.os }}, ${{ matrix.rust }})
+    runs-on: ${{ matrix.os }}
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        rust: [stable, nightly]
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Rust with sccache
+        uses: ./.github/actions/setup-rust-sccache
+        with:
+          toolchain: ${{ matrix.rust }}
+      
+      - name: Run tests
+        run: cargo test --verbose --all-features
+      
+      - name: Run doc tests
+        run: cargo test --doc --all-features
+      
+      - name: Show sccache statistics
+        run: sccache --show-stats
+        if: always()
 
