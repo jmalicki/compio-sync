@@ -68,13 +68,13 @@ impl WaiterQueue {
     }
 
     /// Add a waiter if condition is false
-    pub fn add_waiter_if<F>(&self, condition: F, waker: Waker) -> bool
+    pub async fn add_waiter_if<F>(&self, condition: F, waker: Waker) -> bool
     where
         F: Fn() -> bool,
     {
         match self {
-            WaiterQueue::IoUring(q) => q.add_waiter_if(condition, waker),
-            WaiterQueue::Generic(q) => q.add_waiter_if(condition, waker),
+            WaiterQueue::IoUring(q) => q.add_waiter_if(condition, waker).await,
+            WaiterQueue::Generic(q) => q.add_waiter_if(condition, waker).await,
         }
     }
 
@@ -114,9 +114,13 @@ impl super::WaiterQueueTrait for WaiterQueue {
         WaiterQueue::new()
     }
 
-    fn add_waiter_if<F>(&self, condition: F, waker: Waker) -> bool
+    fn add_waiter_if<F>(
+        &self,
+        condition: F,
+        waker: Waker,
+    ) -> impl std::future::Future<Output = bool> + Send
     where
-        F: Fn() -> bool,
+        F: Fn() -> bool + Send,
     {
         WaiterQueue::add_waiter_if(self, condition, waker)
     }
@@ -139,7 +143,14 @@ impl super::WaiterQueueTrait for WaiterQueue {
 /// Uses io_uring's probe mechanism to detect support for FUTEX_WAIT and FUTEX_WAKE.
 /// Result is cached globally using a lock-free atomic state machine.
 /// We only probe once per process.
+///
+/// TODO: Currently disabled - always returns false to use Generic implementation
+/// until full async trait integration is complete and tested.
 fn supports_io_uring_futex() -> bool {
+    // DISABLED: Always use Generic for now
+    false
+
+    /* Full implementation (disabled):
     // Check cached result first (fast path - lock-free atomic load)
     match FUTEX_SUPPORT.load(Ordering::Acquire) {
         FUTEX_SUPPORTED => return true,
@@ -164,30 +175,42 @@ fn supports_io_uring_futex() -> bool {
     FUTEX_SUPPORT.store(result, Ordering::Release);
 
     supported
+    */
 }
 
 /// Probe io_uring for futex operation support
 ///
 /// Creates a temporary io_uring instance and checks if FUTEX_WAIT/WAKE are available.
+///
+/// TODO: Currently returns false to always use Generic implementation.
+/// The io_uring infrastructure is complete but disabled pending full async integration testing.
+/// Enable by changing this to run the actual probe code.
 fn probe_futex_support() -> bool {
-    // Try to create io_uring instance
-    let ring = match io_uring::IoUring::new(2) {
-        Ok(r) => r,
-        Err(_) => return false,
-    };
+    // TODO: Enable io_uring futex once async integration is fully tested
+    // For now, always use Generic (AtomicWaker) implementation
+    return false;
 
-    // Create and register probe
-    let mut probe = io_uring::Probe::new();
+    #[allow(unreachable_code)]
+    {
+        // Try to create io_uring instance
+        let ring = match io_uring::IoUring::new(2) {
+            Ok(r) => r,
+            Err(_) => return false,
+        };
 
-    if ring.submitter().register_probe(&mut probe).is_err() {
-        return false;
+        // Create and register probe
+        let mut probe = io_uring::Probe::new();
+
+        if ring.submitter().register_probe(&mut probe).is_err() {
+            return false;
+        }
+
+        // Check if FUTEX_WAIT and FUTEX_WAKE opcodes are supported
+        let has_wait = probe.is_supported(io_uring::opcode::FutexWait::CODE);
+        let has_wake = probe.is_supported(io_uring::opcode::FutexWake::CODE);
+
+        has_wait && has_wake
     }
-
-    // Check if FUTEX_WAIT and FUTEX_WAKE opcodes are supported
-    let has_wait = probe.is_supported(io_uring::opcode::FutexWait::CODE);
-    let has_wake = probe.is_supported(io_uring::opcode::FutexWake::CODE);
-
-    has_wait && has_wake
 }
 
 /// io_uring-based waiter queue implementation
@@ -268,9 +291,9 @@ impl IoUringWaiterQueue {
 
     /// Add a waiter if condition is false
     ///
-    /// For io_uring implementation, this is a simplified check.
-    /// The actual futex submission happens in the Future's poll() method.
-    pub fn add_waiter_if<F>(&self, condition: F, _waker: Waker) -> bool
+    /// For io_uring, submits a FutexWaitOp that will wake the provided waker
+    /// when the futex value changes.
+    pub async fn add_waiter_if<F>(&self, condition: F, _waker: Waker) -> bool
     where
         F: Fn() -> bool,
     {
@@ -279,20 +302,29 @@ impl IoUringWaiterQueue {
             return true;
         }
 
-        // For io_uring implementation, we don't submit here
-        // The Future's poll() method will handle submission
-        // Just track that we have a waiter
+        // Track waiter
         self.waiter_count.fetch_add(1, Ordering::Relaxed);
 
         // Post-registration recheck to reduce lost-wake window
-        // (matches generic implementation pattern)
         if condition() {
-            // Condition became true, remove our registration
             self.waiter_count.fetch_sub(1, Ordering::Relaxed);
             return true;
         }
 
-        false // Pending - Future will handle futex submission
+        // Submit futex wait operation to io_uring
+        // compio will associate this with the current task's waker
+        let current_value = self.futex.load(Ordering::Acquire);
+        let op = FutexWaitOp::new(Arc::clone(&self.futex), current_value);
+
+        // Submit and await completion (waker will be called when futex changes)
+        let _ = compio::runtime::submit(op).await;
+
+        // After wake, decrement count
+        let _ = self
+            .waiter_count
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| c.checked_sub(1));
+
+        false // Still pending - caller should re-check condition
     }
 
     /// Wake one waiting task

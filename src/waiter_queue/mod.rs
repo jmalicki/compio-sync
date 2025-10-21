@@ -36,7 +36,6 @@ pub use windows::WaiterQueue;
 pub use generic::WaiterQueue;
 
 // Common trait that all implementations satisfy (for testing and documentation)
-use std::task::Waker;
 
 /// Trait for waiter queue implementations
 ///
@@ -46,12 +45,20 @@ pub trait WaiterQueueTrait {
     /// Create a new waiter queue
     fn new() -> Self;
 
-    /// Add a waiter to the queue if condition is false (atomic check-and-add)
+    /// Poll to add a waiter to the queue if condition is false (atomic check-and-add)
+    ///
+    /// This is a poll-based method to allow platform-specific implementations (like io_uring)
+    /// to submit async operations. Generic implementation returns Poll::Ready immediately.
     ///
     /// Returns:
-    /// - `true` if condition was true (don't wait)
-    /// - `false` if condition was false and waiter was added (pending)
-    fn add_waiter_if<F>(&self, condition: F, waker: Waker) -> bool
+    /// - `Poll::Ready(true)` if condition was true (don't wait)
+    /// - `Poll::Ready(false)` if condition was false and waiter was added (pending)
+    /// - `Poll::Pending` if the operation itself is pending (e.g., io_uring submission)
+    fn poll_add_waiter_if<F>(
+        &self,
+        condition: F,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<bool>
     where
         F: Fn() -> bool;
 
@@ -73,38 +80,27 @@ mod tests {
     use std::task::Wake;
 
     // Helper to create a dummy waker for testing
-    struct DummyWaker;
-    impl Wake for DummyWaker {
-        fn wake(self: Arc<Self>) {}
-    }
-
-    fn dummy_waker() -> Waker {
-        Arc::new(DummyWaker).into()
-    }
-
     #[test]
     fn test_waiter_queue_creation() {
         let _queue = WaiterQueue::new();
         // Should not panic
     }
 
-    #[test]
-    fn test_add_waiter_if_condition_true() {
+    #[compio::test]
+    async fn test_add_waiter_if_condition_true() {
         let queue = WaiterQueue::new();
-        let waker = dummy_waker();
 
         // Condition is true - should NOT add waiter
-        let added = queue.add_waiter_if(|| true, waker);
+        let added = std::future::poll_fn(|cx| queue.poll_add_waiter_if(|| true, cx)).await;
         assert!(added, "Should return true when condition is true");
     }
 
-    #[test]
-    fn test_add_waiter_if_condition_false() {
+    #[compio::test]
+    async fn test_add_waiter_if_condition_false() {
         let queue = WaiterQueue::new();
-        let waker = dummy_waker();
 
         // Condition is false - should add waiter
-        let added = queue.add_waiter_if(|| false, waker);
+        let added = std::future::poll_fn(|cx| queue.poll_add_waiter_if(|| false, cx)).await;
         assert!(!added, "Should return false when condition is false");
     }
 

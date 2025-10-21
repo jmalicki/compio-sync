@@ -405,20 +405,25 @@ impl<'a, W: WaiterQueueTrait> Future for AcquireFuture<'a, W> {
 
         // No permits - add ourselves to waiter queue (unconditionally)
         // We can't use add_waiter_if here because permits are checked separately
-        let _added = self
+        match self
             .semaphore
             .inner
             .waiters
-            .add_waiter_if(|| false, cx.waker().clone());
-
-        // CRITICAL: Try again after registering
-        // Catches permits released during registration
-        if let Some(permit) = self.semaphore.try_acquire() {
-            return Poll::Ready(permit);
+            .poll_add_waiter_if(|| false, cx)
+        {
+            Poll::Ready(_added) => {
+                // Waker registered, try again before pending
+                if let Some(permit) = self.semaphore.try_acquire() {
+                    return Poll::Ready(permit);
+                }
+                // No permits available, wait for wakeup
+                Poll::Pending
+            }
+            Poll::Pending => {
+                // Future itself is pending (e.g. io_uring submission)
+                Poll::Pending
+            }
         }
-
-        // No permits available, wait for wakeup
-        Poll::Pending
     }
 }
 
