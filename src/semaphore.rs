@@ -67,7 +67,7 @@ use std::task::{Context, Poll};
 /// ```
 pub struct Semaphore {
     /// Internal state for the semaphore
-    /// Users should wrap in Arc<Semaphore> when sharing between tasks
+    /// Users should wrap in `Arc<Semaphore>` when sharing between tasks
     inner: SemaphoreInner,
 }
 
