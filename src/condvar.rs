@@ -28,7 +28,7 @@
 //! }
 //! ```
 
-use crate::waiter_queue::WaiterQueue;
+use crate::waiter_queue::{WaiterQueue, WaiterQueueTrait};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -81,11 +81,17 @@ use std::task::{Context, Poll};
 /// }
 /// # }
 /// ```
-pub struct Condvar {
+pub struct CondvarGeneric<W: WaiterQueueTrait> {
     /// Internal state for the condition variable
     /// Users should wrap in `Arc<Condvar>` when sharing between tasks
-    inner: CondvarInner,
+    inner: CondvarInner<W>,
 }
+
+/// Public type alias using platform-specific WaiterQueue
+///
+/// This is what users actually interact with. The generic implementation
+/// allows for flexibility and testing while this alias keeps the API simple.
+pub type Condvar = CondvarGeneric<WaiterQueue>;
 
 /// Internal state using shared waiter queue abstraction
 ///
@@ -104,15 +110,15 @@ pub struct Condvar {
 /// 2. Notifier: lock, set notified → true, drain waiters, unlock
 ///
 /// The WaiterQueue encapsulates this pattern for reuse across sync primitives.
-struct CondvarInner {
+struct CondvarInner<W: WaiterQueueTrait> {
     /// Notification flag (true = notified, wake immediately)
     notified: AtomicBool,
 
     /// Waiter queue abstraction (handles mutex + check-and-add pattern)
-    waiters: WaiterQueue,
+    waiters: W,
 }
 
-impl Condvar {
+impl<W: WaiterQueueTrait> CondvarGeneric<W> {
     /// Create a new condition variable
     ///
     /// The condition variable starts in the "not notified" state.
@@ -131,7 +137,7 @@ impl Condvar {
         Self {
             inner: CondvarInner {
                 notified: AtomicBool::new(false),
-                waiters: WaiterQueue::new(),
+                waiters: W::new(),
             },
         }
     }
@@ -152,7 +158,7 @@ impl Condvar {
     /// # }
     /// ```
     pub async fn wait(&self) {
-        WaitFuture { condvar: self }.await
+        WaitFuture::<W> { condvar: self }.await
     }
 
     /// Notify one waiting task
@@ -219,8 +225,9 @@ impl Condvar {
     /// # }
     /// ```
     pub fn clear(&self) {
-        // Relaxed ordering is fine - this is just a reset, no synchronization needed
-        self.inner.notified.store(false, Ordering::Relaxed);
+        // Use Release ordering to ensure threads don't observe stale 'true' after clear
+        // Pairs with Acquire loads in wait()
+        self.inner.notified.store(false, Ordering::Release);
     }
 
     /// Get the number of tasks waiting on this condvar
@@ -233,19 +240,19 @@ impl Condvar {
     }
 }
 
-impl Default for Condvar {
+impl<W: WaiterQueueTrait> Default for CondvarGeneric<W> {
     fn default() -> Self {
         Self::new()
     }
 }
 
 /// Future returned by `Condvar::wait()`
-struct WaitFuture<'a> {
+struct WaitFuture<'a, W: WaiterQueueTrait> {
     /// The condition variable to wait on
-    condvar: &'a Condvar,
+    condvar: &'a CondvarGeneric<W>,
 }
 
-impl<'a> Future for WaitFuture<'a> {
+impl<'a, W: WaiterQueueTrait> Future for WaitFuture<'a, W> {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
