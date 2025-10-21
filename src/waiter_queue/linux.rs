@@ -21,6 +21,9 @@ use compio_driver::{OpCode, OpEntry};
 #[cfg(target_os = "linux")]
 use std::pin::Pin;
 
+#[cfg(target_os = "linux")]
+use libc;
+
 /// Global cached result of futex support detection
 /// Uses lock-free atomic state machine for thread-safe lazy initialization
 /// 0 = not checked yet, 1 = not supported, 2 = supported
@@ -210,8 +213,8 @@ pub struct IoUringWaiterQueue {
 
 /// Submit futex wake operation
 ///
-/// Submits a futex wake operation to io_uring. This is fire-and-forget -
-/// we don't need to wait for the wake to complete.
+/// Submits a futex wake operation to io_uring if in runtime context.
+/// Falls back to direct syscall if not in runtime (e.g., during drop in sync tests).
 fn submit_futex_wake(op: FutexWakeOp) {
     // Check if we're in a runtime context first
     // Runtime::with_current will panic if not in runtime
@@ -222,12 +225,25 @@ fn submit_futex_wake(op: FutexWakeOp) {
 
     if !in_runtime {
         // Not in runtime context (e.g., sync test calling drop())
-        // Futex value was already incremented, so waiters will see the change
-        // In real async usage, runtime will be available
+        // CRITICAL: Must issue direct syscall or waiters will hang!
+        // Futex value increment alone doesn't wake - need explicit FUTEX_WAKE syscall
+        #[cfg(target_os = "linux")]
+        unsafe {
+            let futex_ptr = Arc::as_ptr(&op.futex) as *const u32;
+            libc::syscall(
+                libc::SYS_futex,
+                futex_ptr,
+                libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
+                op.count as libc::c_int,
+                std::ptr::null::<libc::timespec>(),
+                std::ptr::null::<u32>(),
+                0,
+            );
+        }
         return;
     }
 
-    // Spawn task to submit wake (fire-and-forget)
+    // Spawn task to submit wake via io_uring (fire-and-forget)
     let _handle = compio::runtime::spawn(async move {
         let _ = compio::runtime::submit(op).await;
     });
@@ -287,11 +303,13 @@ impl IoUringWaiterQueue {
         // Increment futex value (this signals change to waiters)
         self.futex.fetch_add(1, Ordering::Release);
 
-        // Decrement waiter count
-        let count = self.waiter_count.load(Ordering::Relaxed);
-        if count > 0 {
-            self.waiter_count.fetch_sub(1, Ordering::Relaxed);
-        }
+        // Decrement waiter count atomically with saturation
+        // Use fetch_update to prevent underflow from concurrent decrements
+        let _ = self.waiter_count.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |c| c.checked_sub(1),
+        );
 
         // Submit futex wake operation to io_uring
         let op = FutexWakeOp::new(Arc::clone(&self.futex), 1);

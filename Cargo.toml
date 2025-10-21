@@ -27,6 +27,7 @@ num_enum = "0.7"
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = "0.7"
 compio-driver = "0.9"
+libc = "0.2"  # For direct futex syscalls when not in runtime
 
 [dev-dependencies]
 compio = { version = "0.16", features = ["macros", "time"] }
