@@ -8,15 +8,23 @@ This document describes the sccache integration and phased CI pipeline added to 
 
 ## CI Pipeline Phases
 
-The CI workflow is now structured in **4 phases** that run sequentially, with each phase depending on the previous one:
+The CI workflow is structured in **3 main phases** with Phase 1 running two jobs in parallel:
 
-### Phase 1: Code Quality (Runs First)
+### Phase 1: Parallel Quality Checks
+
+**Code Quality** (Blocking):
 - **Job**: `code-quality`
 - **Purpose**: Fast feedback on formatting and linting issues
 - **Runs**: 
   - `cargo fmt` - formatting check
   - `cargo clippy` - linting with sccache
-- **Benefits**: Fails fast if code doesn't meet quality standards, saving CI time
+- **Benefits**: Fails fast if code doesn't meet quality standards, saving CI time. Gates Phase 2.
+
+**Documentation** (Non-blocking):
+- **Job**: `docs`
+- **Purpose**: Build and verify documentation
+- **Runs**: `cargo doc` with warning-as-error
+- **Benefits**: Runs in parallel with code quality for early doc feedback. Does not block the pipeline.
 
 ### Phase 2: Build
 - **Jobs**: `build` (matrix: stable + nightly)
@@ -26,6 +34,7 @@ The CI workflow is now structured in **4 phases** that run sequentially, with ea
   - Test binaries
   - Benchmark binaries (stable only)
 - **sccache**: Caches compilation artifacts for use by test phase
+- **Depends on**: Code Quality must pass
 
 ### Phase 3: Test
 - **Jobs**: `test` (matrix: stable + nightly)
@@ -35,26 +44,16 @@ The CI workflow is now structured in **4 phases** that run sequentially, with ea
   - Integration tests
   - Doc tests
 - **Benefits**: Tests reuse sccache artifacts from build phase
-
-### Phase 4: Documentation
-- **Job**: `docs`
-- **Purpose**: Build and verify documentation
-- **Runs**: `cargo doc` with warning-as-error
-- **Benefits**: Reuses sccache artifacts from previous phases
-
-### Final Gate: CI Success
-- **Job**: `ci-success`
-- **Purpose**: Single status check that indicates all CI phases passed
-- **Benefits**: Simplifies branch protection rules
+- **Depends on**: Build must complete
 
 ## What Changed
 
 ### 1. Custom Composite Action (`.github/actions/setup-rust-sccache/action.yml`)
 
-A reusable composite action that:
+A reusable GitHub Actions composite action that:
 - Installs the Rust toolchain using `actions-rust-lang/setup-rust-toolchain@v1.15.2`
-- Sets up sccache using `mozilla-actions/sccache-action@v0.0.7`
-- Caches Rust dependencies with `Swatinem/rust-cache@v2`
+- Sets up sccache using `mozilla-actions/sccache-action@v0.0.9`
+- Caches Rust dependencies with `Swatinem/rust-cache@v2.8.1`
 - Caches sccache artifacts explicitly with `actions/cache@v4`
 
 **Key improvements for cross-job caching:**
@@ -66,7 +65,7 @@ A reusable composite action that:
 ### 2. Phased CI Workflow (`.github/workflows/ci.yml`)
 
 Changes include:
-- **Phased Structure**: 4 sequential phases with proper dependencies
+- **Phased Structure**: 3 phases with proper dependencies (Phase 1 runs code-quality and docs in parallel)
 - **Environment Variables**: Added `RUSTC_WRAPPER=sccache` and `SCCACHE_GHA_ENABLED=true` to enable sccache
 - **Concurrency Control**: Added concurrency group to cancel in-progress runs when new commits are pushed
 - **Matrix Strategy**: Build and test on stable + nightly (extensible to multiple OS)

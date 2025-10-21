@@ -24,12 +24,12 @@ runs:
         components: ${{ inputs.components }}
     
     - name: Setup sccache
-      uses: mozilla-actions/sccache-action@v0.0.7
+      uses: mozilla-actions/sccache-action@v0.0.9
     
     # Enhanced caching strategy for Cargo dependencies
     # This shares cache across all jobs in the workflow
     - name: Cache Rust dependencies and build artifacts
-      uses: Swatinem/rust-cache@v2
+      uses: Swatinem/rust-cache@v2.8.1
       with:
         # Shared prefix for all compio-sync builds
         prefix-key: "v1-compio-sync"

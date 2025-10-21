@@ -272,7 +272,9 @@ Look for:
 
 ## Example Timeline
 
-Typical execution times (with warm cache):
+### Warm Cache Timeline
+
+Typical execution times with warm cache (subsequent runs):
 
 ```mermaid
 gantt
@@ -294,7 +296,17 @@ gantt
 ```
 
 **Total time**: ~95 seconds (warm cache)
-**Without sccache**: ~5-8 minutes
+
+### Cold-start Timeline
+
+First run with empty cache (typical):
+
+- **Phase 1**: ~45-50s (clippy compilation, cache miss)
+- **Phase 2**: ~3-5 min (full compilation, establishing cache)
+- **Phase 3**: ~20-30s (run tests)
+- **Total**: ~5-8 minutes (establishes baseline cache for future runs)
+
+**Cache Improvement**: After the first run, subsequent builds are ~5-10x faster due to sccache hits.
 
 ## Troubleshooting
 
