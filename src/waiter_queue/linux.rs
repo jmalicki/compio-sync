@@ -11,8 +11,8 @@
 //! Fallback: If requirements not met, falls back to generic implementation
 
 use super::generic::WaiterQueue as GenericWaiterQueue;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::task::Waker;
 
 #[cfg(target_os = "linux")]
@@ -22,8 +22,13 @@ use compio_driver::{OpCode, OpEntry};
 use std::pin::Pin;
 
 /// Global cached result of futex support detection
-/// Checked once per process using OnceLock for thread-safe lazy initialization
-static FUTEX_SUPPORT: OnceLock<bool> = OnceLock::new();
+/// Uses lock-free atomic state machine for thread-safe lazy initialization
+/// 0 = not checked yet, 1 = not supported, 2 = supported
+static FUTEX_SUPPORT: AtomicU8 = AtomicU8::new(0);
+
+const FUTEX_UNKNOWN: u8 = 0;
+const FUTEX_UNSUPPORTED: u8 = 1;
+const FUTEX_SUPPORTED: u8 = 2;
 
 /// Linux waiter queue - uses io_uring futex operations when available,
 /// falls back to generic implementation otherwise
@@ -132,9 +137,33 @@ impl super::WaiterQueueTrait for WaiterQueue {
 /// Check if kernel supports io_uring futex operations
 ///
 /// Uses io_uring's probe mechanism to detect support for FUTEX_WAIT and FUTEX_WAKE.
-/// Result is cached globally - we only probe once per process using OnceLock.
+/// Result is cached globally using a lock-free atomic state machine.
+/// We only probe once per process.
 fn supports_io_uring_futex() -> bool {
-    *FUTEX_SUPPORT.get_or_init(probe_futex_support)
+    // Check cached result first (fast path - lock-free atomic load)
+    match FUTEX_SUPPORT.load(Ordering::Acquire) {
+        FUTEX_SUPPORTED => return true,
+        FUTEX_UNSUPPORTED => return false,
+        FUTEX_UNKNOWN => {
+            // Need to probe - continue below
+        }
+        _ => unreachable!(),
+    }
+
+    // Probe io_uring for futex support (slow path, only once)
+    let supported = probe_futex_support();
+
+    // Cache the result atomically (lock-free)
+    // Note: Multiple threads might probe simultaneously on first call,
+    // but that's okay - they'll all get the same result
+    let result = if supported {
+        FUTEX_SUPPORTED
+    } else {
+        FUTEX_UNSUPPORTED
+    };
+    FUTEX_SUPPORT.store(result, Ordering::Release);
+
+    supported
 }
 
 /// Probe io_uring for futex operation support
