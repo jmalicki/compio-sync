@@ -11,13 +11,17 @@
 //! Fallback: If requirements not met, falls back to generic implementation
 
 use super::generic::WaiterQueue as GenericWaiterQueue;
-use compio_driver::{OpCode, OpEntry};
-use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::task::Waker;
+
+#[cfg(target_os = "linux")]
+use compio_driver::{OpCode, OpEntry};
+
+#[cfg(target_os = "linux")]
+use std::pin::Pin;
 
 /// Global cached result of futex support detection
-/// Uses lock-free atomic state machine for thread-safe lazy initialization
 /// 0 = not checked yet, 1 = not supported, 2 = supported
 static FUTEX_SUPPORT: AtomicU8 = AtomicU8::new(0);
 
@@ -51,9 +55,6 @@ impl WaiterQueue {
     ///
     /// This is used by platform-specific Future implementations.
     /// Only available when using IoUring variant.
-    ///
-    /// TODO: Integrate with Semaphore/Condvar futures for full io_uring usage
-    #[allow(dead_code)]
     #[cfg(target_os = "linux")]
     pub(crate) fn get_futex(&self) -> Option<Arc<AtomicU32>> {
         match self {
@@ -63,20 +64,13 @@ impl WaiterQueue {
     }
 
     /// Add a waiter if condition is false
-    pub fn add_waiter_if<'a, F>(
-        &'a self,
-        condition: F,
-    ) -> impl std::future::Future<Output = ()> + use<'a, F>
+    pub fn add_waiter_if<F>(&self, condition: F, waker: Waker) -> bool
     where
-        F: Fn() -> bool + Send + Sync + 'a,
+        F: Fn() -> bool,
     {
         match self {
-            WaiterQueue::IoUring(q) => {
-                // Box to make the arms have the same type
-                Box::pin(q.add_waiter_if(condition))
-                    as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>>
-            }
-            WaiterQueue::Generic(q) => Box::pin(q.add_waiter_if(condition)),
+            WaiterQueue::IoUring(q) => q.add_waiter_if(condition, waker),
+            WaiterQueue::Generic(q) => q.add_waiter_if(condition, waker),
         }
     }
 
@@ -116,11 +110,11 @@ impl super::WaiterQueueTrait for WaiterQueue {
         WaiterQueue::new()
     }
 
-    fn add_waiter_if<'a, F>(&'a self, condition: F) -> impl std::future::Future<Output = ()>
+    fn add_waiter_if<F>(&self, condition: F, waker: Waker) -> bool
     where
-        F: Fn() -> bool + Send + Sync + 'a,
+        F: Fn() -> bool,
     {
-        WaiterQueue::add_waiter_if(self, condition)
+        WaiterQueue::add_waiter_if(self, condition, waker)
     }
 
     fn wake_one(&self) {
@@ -139,10 +133,9 @@ impl super::WaiterQueueTrait for WaiterQueue {
 /// Check if kernel supports io_uring futex operations
 ///
 /// Uses io_uring's probe mechanism to detect support for FUTEX_WAIT and FUTEX_WAKE.
-/// Result is cached globally using a lock-free atomic state machine.
-/// We only probe once per process.
+/// Result is cached globally - we only probe once per process.
 fn supports_io_uring_futex() -> bool {
-    // Check cached result first (fast path - lock-free atomic load)
+    // Check cached result first (fast path)
     match FUTEX_SUPPORT.load(Ordering::Acquire) {
         FUTEX_SUPPORTED => return true,
         FUTEX_UNSUPPORTED => return false,
@@ -155,9 +148,7 @@ fn supports_io_uring_futex() -> bool {
     // Probe io_uring for futex support (slow path, only once)
     let supported = probe_futex_support();
 
-    // Cache the result atomically (lock-free)
-    // Note: Multiple threads might probe simultaneously on first call,
-    // but that's okay - they'll all get the same result
+    // Cache the result atomically
     let result = if supported {
         FUTEX_SUPPORTED
     } else {
@@ -205,12 +196,15 @@ pub struct IoUringWaiterQueue {
     /// Futex word for wait/wake operations
     /// Using AtomicU32 because futex operates on u32
     futex: Arc<AtomicU32>,
+
+    /// Waiter count (approximate, for debugging)
+    waiter_count: AtomicUsize,
 }
 
 /// Submit futex wake operation
 ///
-/// Submits a futex wake operation to io_uring if in runtime context.
-/// Falls back to direct syscall if not in runtime (e.g., during drop in sync tests).
+/// Submits a futex wake operation to io_uring. This is fire-and-forget -
+/// we don't need to wait for the wake to complete.
 fn submit_futex_wake(op: FutexWakeOp) {
     // Check if we're in a runtime context first
     // Runtime::with_current will panic if not in runtime
@@ -221,30 +215,12 @@ fn submit_futex_wake(op: FutexWakeOp) {
 
     if !in_runtime {
         // Not in runtime context (e.g., sync test calling drop())
-        // CRITICAL: Must use futex2 syscall to wake io_uring futex waiters!
-        //
-        // io_uring FUTEX_WAIT/WAKE use futex2 API, NOT legacy futex.
-        // Using legacy SYS_futex(FUTEX_WAKE) is incompatible and won't wake futex2 waiters.
-        #[cfg(target_os = "linux")]
-        unsafe {
-            // sys_futex_wake (futex2) - syscall 454 on x86_64
-            // Available since Linux 6.7 (same as io_uring futex support)
-            const SYS_FUTEX_WAKE: libc::c_long = 454;
-
-            let futex_ptr = Arc::as_ptr(&op.futex) as *mut u32;
-            libc::syscall(
-                SYS_FUTEX_WAKE,
-                futex_ptr,                 // uaddr
-                op.count as libc::c_uint,  // nr_wake
-                u64::MAX as libc::c_ulong, // mask (match all bits)
-                0 as libc::c_uint,         // flags (FUTEX2_PRIVATE is default)
-                0 as libc::c_uint,         // val3 (unused)
-            );
-        }
+        // Futex value was already incremented, so waiters will see the change
+        // In real async usage, runtime will be available
         return;
     }
 
-    // Spawn task to submit wake via io_uring (fire-and-forget)
+    // Spawn task to submit wake (fire-and-forget)
     let _handle = compio::runtime::spawn(async move {
         let _ = compio::runtime::submit(op).await;
     });
@@ -255,6 +231,7 @@ impl IoUringWaiterQueue {
     pub fn new() -> Self {
         Self {
             futex: Arc::new(AtomicU32::new(0)),
+            waiter_count: AtomicUsize::new(0),
         }
     }
 
@@ -262,48 +239,41 @@ impl IoUringWaiterQueue {
     ///
     /// This is used by platform-specific Future implementations to create
     /// futex wait operations.
-    ///
-    /// TODO: Integrate with Semaphore/Condvar futures for full io_uring usage
-    #[allow(dead_code)]
     pub(crate) fn get_futex(&self) -> Arc<AtomicU32> {
         Arc::clone(&self.futex)
     }
 
     /// Add a waiter if condition is false
     ///
-    /// For io_uring, returns the submit() future directly!
-    /// The caller will await this future, and compio will wake them when the futex changes.
-    ///
-    /// **Note**: The returned future is `!Send` because io_uring operations are
-    /// thread-local in compio's runtime.
-    pub fn add_waiter_if<F>(&self, condition: F) -> impl std::future::Future<Output = ()> + use<F>
+    /// For io_uring implementation, this is a simplified check.
+    /// The actual futex submission happens in the Future's poll() method.
+    pub fn add_waiter_if<F>(&self, condition: F, _waker: Waker) -> bool
     where
-        F: Fn() -> bool + Send + Sync,
+        F: FnOnce() -> bool,
     {
-        let futex = Arc::clone(&self.futex);
-
-        async move {
-            // Fast path: check condition first
-            if condition() {
-                return;
-            }
-
-            // Submit futex wait - this future completes when futex value changes
-            let current_value = futex.load(Ordering::Acquire);
-            let op = FutexWaitOp::new(futex.clone(), current_value);
-
-            // Just await the submit - compio handles the waker!
-            // When the futex value changes (via wake_one/wake_all), this completes
-            let _ = compio::runtime::submit(op).await;
-
-            // Note: No waiter count tracking - kernel manages waiters internally
+        // FAST PATH: Check condition first (pure userspace)
+        if condition() {
+            return true;
         }
+
+        // For io_uring implementation, we don't submit here
+        // The Future's poll() method will handle submission
+        // Just track that we have a waiter
+        self.waiter_count.fetch_add(1, Ordering::Relaxed);
+
+        false // Pending - Future will handle futex submission
     }
 
     /// Wake one waiting task
     pub fn wake_one(&self) {
         // Increment futex value (this signals change to waiters)
         self.futex.fetch_add(1, Ordering::Release);
+
+        // Decrement waiter count
+        let count = self.waiter_count.load(Ordering::Relaxed);
+        if count > 0 {
+            self.waiter_count.fetch_sub(1, Ordering::Relaxed);
+        }
 
         // Submit futex wake operation to io_uring
         let op = FutexWakeOp::new(Arc::clone(&self.futex), 1);
@@ -318,27 +288,17 @@ impl IoUringWaiterQueue {
         // Increment futex value
         self.futex.fetch_add(1, Ordering::Release);
 
+        // Reset waiter count
+        self.waiter_count.store(0, Ordering::Relaxed);
+
         // Submit futex wake operation to wake all waiters
-        // Use u32::MAX to wake all possible waiters
-        let op = FutexWakeOp::new(Arc::clone(&self.futex), u32::MAX);
+        let op = FutexWakeOp::new(Arc::clone(&self.futex), i32::MAX as u32);
         submit_futex_wake(op);
     }
 
-    /// Get waiter count
-    ///
-    /// NOT SUPPORTED for io_uring futex implementation.
-    /// The kernel manages waiters internally; there's no API to query the count.
+    /// Get waiter count (approximate)
     pub fn waiter_count(&self) -> usize {
-        panic!(
-            "waiter_count() not supported for io_uring futex implementation - \
-             kernel manages waiters internally with no userspace query API"
-        )
-    }
-}
-
-impl Default for IoUringWaiterQueue {
-    fn default() -> Self {
-        Self::new()
+        self.waiter_count.load(Ordering::Relaxed)
     }
 }
 
@@ -348,9 +308,6 @@ impl Default for IoUringWaiterQueue {
 /// The waker is managed by compio's runtime when this operation is submitted.
 ///
 /// This is an internal implementation detail, not part of the public API.
-///
-/// TODO: Integrate with Semaphore/Condvar futures for full io_uring usage
-#[allow(dead_code)]
 #[cfg(target_os = "linux")]
 pub(crate) struct FutexWaitOp {
     /// Shared futex word to wait on
@@ -361,7 +318,6 @@ pub(crate) struct FutexWaitOp {
 
 impl FutexWaitOp {
     /// Create a new futex wait operation
-    #[allow(dead_code)]
     pub(crate) fn new(futex: Arc<AtomicU32>, expected: u32) -> Self {
         Self { futex, expected }
     }
@@ -420,7 +376,7 @@ impl OpCode for FutexWakeOp {
         let futex_ptr = Arc::as_ptr(&self.futex) as *const u32;
 
         // Create futex wake operation
-        // Parameters: futex address, count, mask (u64::MAX = match all bits), futex_flags
+        // Parameters: futex address, count, mask (0 = any), futex_flags (0 = none)
         let entry = opcode::FutexWake::new(
             futex_ptr,
             self.count as u64, // Number to wake
