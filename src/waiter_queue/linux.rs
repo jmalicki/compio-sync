@@ -305,11 +305,9 @@ impl IoUringWaiterQueue {
 
         // Decrement waiter count atomically with saturation
         // Use fetch_update to prevent underflow from concurrent decrements
-        let _ = self.waiter_count.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |c| c.checked_sub(1),
-        );
+        let _ = self
+            .waiter_count
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| c.checked_sub(1));
 
         // Submit futex wake operation to io_uring
         let op = FutexWakeOp::new(Arc::clone(&self.futex), 1);
