@@ -55,13 +55,14 @@ impl WaiterQueue {
     /// This provides the critical race-free pattern:
     /// - Checks condition INSIDE critical section
     /// - Adds waiter only if condition is false
+    /// - Re-checks after registration to prevent lost wakeups
     ///
     /// Returns:
     /// - `true` if condition was true (ready immediately)
     /// - `false` if condition was false (waiter added, pending)
     pub fn add_waiter_if<F>(&self, condition: F, waker: Waker) -> bool
     where
-        F: FnOnce() -> bool,
+        F: Fn() -> bool,
     {
         // Try single-waiter fast path first
         let mode = self.mode.load(Ordering::Acquire);
@@ -76,37 +77,55 @@ impl WaiterQueue {
                 // Successfully claimed single slot
                 {
                     let mut single = self.single.lock();
-
-                    // CRITICAL: Check condition inside lock
+                    
+                    // Check before registration
                     if condition() {
-                        // Condition met - don't wait
-                        // Reset to EMPTY
                         self.mode.store(MODE_EMPTY, Ordering::Release);
                         return true;
                     }
-
-                    // Store waker
+                    
+                    // Register
                     *single = Some(waker);
+                    
+                    // Re-check after registration to prevent lost wake
+                    if condition() {
+                        // Remove and reset mode
+                        let _ = single.take();
+                        self.mode.store(MODE_EMPTY, Ordering::Release);
+                        return true;
+                    }
                 }
-
-                return false; // Pending
+                return false; // pending
             }
         }
 
-        // Multiple waiters or contention → use multi queue
-        let mut waiters = self.multi.lock();
-
-        // CRITICAL: Check condition inside lock
+        // Multiple waiters or contention → use multi queue (and migrate single)
+        // Lock order: single → multi (matches wake_all) to avoid deadlocks.
+        let mut single = self.single.lock();
         if condition() {
-            // Condition met - don't wait
             return true;
         }
-
-        // Add to multi queue
+        let mut waiters = self.multi.lock();
+        // Migrate single-slot waiter if present
+        if let Some(prev) = single.take() {
+            waiters.push_back(prev);
+        }
+        // Register this waiter
         waiters.push_back(waker);
+        // Re-check after registration to prevent lost wake
+        if condition() {
+            // Remove our own registration
+            let _ = waiters.pop_back();
+            // If nothing remains, update mode accordingly
+            if waiters.is_empty() {
+                self.mode.store(MODE_EMPTY, Ordering::Release);
+            } else {
+                self.mode.store(MODE_MULTI, Ordering::Release);
+            }
+            return true;
+        }
         self.mode.store(MODE_MULTI, Ordering::Release);
-
-        false // Pending
+        false
     }
 
     /// Wake one waiting task
@@ -141,31 +160,30 @@ impl WaiterQueue {
                 }
             }
             MODE_MULTI => {
-                // Wake from multi queue
-                self.wake_one_from_multi();
+                // Prefer multi; if empty, also try single
+                if !self.wake_one_from_multi() {
+                    let w = { self.single.lock().take() };
+                    if let Some(w) = w {
+                        w.wake();
+                    } else {
+                        // Both empty, reset mode
+                        self.mode.store(MODE_EMPTY, Ordering::Release);
+                    }
+                }
             }
             _ => unreachable!("Invalid mode"),
         }
     }
 
     /// Wake one waiter from multi queue (internal helper)
-    fn wake_one_from_multi(&self) {
+    /// Returns true if a waiter was woken, false otherwise
+    fn wake_one_from_multi(&self) -> bool {
         let waker = {
             let mut waiters = self.multi.lock();
             let waker = waiters.pop_front();
 
-            // If queue is now empty, check if we should reset mode
-            if waiters.is_empty() {
-                // Try to transition to EMPTY
-                // Note: There might be a race where a new waiter is being added
-                // That's OK - the mode will be set to MULTI by the new waiter
-                let _ = self.mode.compare_exchange(
-                    MODE_MULTI,
-                    MODE_EMPTY,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                );
-            }
+            // If queue is now empty, defer mode update to caller
+            // (caller may still need to check single slot)
 
             waker
         };
@@ -173,37 +191,28 @@ impl WaiterQueue {
         // Wake outside lock
         if let Some(waker) = waker {
             waker.wake();
+            return true;
         }
+        false
     }
 
     /// Wake all waiting tasks
     pub fn wake_all(&self) {
-        // Take all wakers
-        let wakers = {
-            // Check single waiter first
-            let single_waker = if self.mode.load(Ordering::Acquire) == MODE_SINGLE {
-                let mut single = self.single.lock();
-                single.take()
-            } else {
-                None
-            };
-
-            // Take all from multi queue
+        // Drain both storages (lock order: single → multi)
+        let single_waker = { self.single.lock().take() };
+        let multi_wakers = {
             let mut waiters = self.multi.lock();
-            let multi_wakers = std::mem::take(&mut *waiters);
-
-            // Reset mode to EMPTY
-            self.mode.store(MODE_EMPTY, Ordering::Release);
-
-            (single_waker, multi_wakers)
+            std::mem::take(&mut *waiters)
         };
+        // Reset mode after draining
+        self.mode.store(MODE_EMPTY, Ordering::Release);
 
         // Wake all outside lock
-        if let Some(waker) = wakers.0 {
+        if let Some(waker) = single_waker {
             waker.wake();
         }
 
-        for waker in wakers.1 {
+        for waker in multi_wakers {
             waker.wake();
         }
     }
@@ -237,9 +246,6 @@ impl Default for WaiterQueue {
     }
 }
 
-// Safety: WaiterQueue can be shared across threads
-unsafe impl Send for WaiterQueue {}
-unsafe impl Sync for WaiterQueue {}
 
 #[cfg(test)]
 mod tests {

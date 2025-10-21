@@ -49,7 +49,7 @@ pub trait WaiterQueueTrait {
     /// - `false` if condition was false and waiter was added (pending)
     fn add_waiter_if<F>(&self, condition: F, waker: Waker) -> bool
     where
-        F: FnOnce() -> bool;
+        F: Fn() -> bool;
 
     /// Wake one waiting task
     fn wake_one(&self);

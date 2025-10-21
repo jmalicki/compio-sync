@@ -158,7 +158,7 @@ async fn test_future_cancellation_stress() {
         let sem = Arc::new(Semaphore::new(1));
 
         // Hold the permit
-        let _permit = sem.acquire().await;
+        let permit = sem.acquire().await;
 
         // Start many futures but drop them
         for _ in 0..100 {
@@ -171,7 +171,7 @@ async fn test_future_cancellation_stress() {
         }
 
         // Semaphore should still work
-        drop(_permit);
+        drop(permit);
         let _p2 = sem.acquire().await;
     })
     .await;

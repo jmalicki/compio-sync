@@ -17,9 +17,10 @@ fn bench_uncontended_try_acquire(c: &mut Criterion) {
 }
 
 fn bench_uncontended_acquire(c: &mut Criterion) {
+    let rt = compio::runtime::Runtime::new().unwrap();
     c.bench_function("semaphore/uncontended/acquire", |b| {
         b.iter(|| {
-            compio::runtime::Runtime::new().unwrap().block_on(async {
+            rt.block_on(async {
                 let sem = Semaphore::new(100);
                 let p = sem.acquire().await;
                 black_box(p);
@@ -30,6 +31,7 @@ fn bench_uncontended_acquire(c: &mut Criterion) {
 
 fn bench_contended_varying_concurrency(c: &mut Criterion) {
     let mut group = c.benchmark_group("semaphore/contended");
+    let rt = compio::runtime::Runtime::new().unwrap();
 
     for concurrency in [2, 4, 8, 16, 32, 64].iter() {
         group.bench_with_input(
@@ -37,7 +39,7 @@ fn bench_contended_varying_concurrency(c: &mut Criterion) {
             concurrency,
             |b, &concurrency| {
                 b.iter(|| {
-                    compio::runtime::Runtime::new().unwrap().block_on(async {
+                    rt.block_on(async {
                         let sem = Arc::new(Semaphore::new(4));
                         let mut handles = vec![];
 
@@ -62,9 +64,10 @@ fn bench_contended_varying_concurrency(c: &mut Criterion) {
 }
 
 fn bench_acquire_release_cycles(c: &mut Criterion) {
+    let rt = compio::runtime::Runtime::new().unwrap();
     c.bench_function("semaphore/cycles/1000_iterations", |b| {
         b.iter(|| {
-            compio::runtime::Runtime::new().unwrap().block_on(async {
+            rt.block_on(async {
                 let sem = Semaphore::new(1);
                 for _ in 0..1000 {
                     let p = sem.acquire().await;
@@ -76,9 +79,10 @@ fn bench_acquire_release_cycles(c: &mut Criterion) {
 }
 
 fn bench_high_permits_low_contention(c: &mut Criterion) {
+    let rt = compio::runtime::Runtime::new().unwrap();
     c.bench_function("semaphore/high_permits/acquire_100_of_1000", |b| {
         b.iter(|| {
-            compio::runtime::Runtime::new().unwrap().block_on(async {
+            rt.block_on(async {
                 let sem = Arc::new(Semaphore::new(1000));
                 let mut handles = vec![];
 
