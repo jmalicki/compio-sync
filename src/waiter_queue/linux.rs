@@ -11,8 +11,8 @@
 //! Fallback: If requirements not met, falls back to generic implementation
 
 use super::generic::WaiterQueue as GenericWaiterQueue;
-use std::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::task::Waker;
 
 #[cfg(target_os = "linux")]
@@ -22,12 +22,8 @@ use compio_driver::{OpCode, OpEntry};
 use std::pin::Pin;
 
 /// Global cached result of futex support detection
-/// 0 = not checked yet, 1 = not supported, 2 = supported
-static FUTEX_SUPPORT: AtomicU8 = AtomicU8::new(0);
-
-const FUTEX_UNKNOWN: u8 = 0;
-const FUTEX_UNSUPPORTED: u8 = 1;
-const FUTEX_SUPPORTED: u8 = 2;
+/// Checked once per process using OnceLock for thread-safe lazy initialization
+static FUTEX_SUPPORT: OnceLock<bool> = OnceLock::new();
 
 /// Linux waiter queue - uses io_uring futex operations when available,
 /// falls back to generic implementation otherwise
@@ -136,30 +132,9 @@ impl super::WaiterQueueTrait for WaiterQueue {
 /// Check if kernel supports io_uring futex operations
 ///
 /// Uses io_uring's probe mechanism to detect support for FUTEX_WAIT and FUTEX_WAKE.
-/// Result is cached globally - we only probe once per process.
+/// Result is cached globally - we only probe once per process using OnceLock.
 fn supports_io_uring_futex() -> bool {
-    // Check cached result first (fast path)
-    match FUTEX_SUPPORT.load(Ordering::Acquire) {
-        FUTEX_SUPPORTED => return true,
-        FUTEX_UNSUPPORTED => return false,
-        FUTEX_UNKNOWN => {
-            // Need to probe - continue below
-        }
-        _ => unreachable!(),
-    }
-
-    // Probe io_uring for futex support (slow path, only once)
-    let supported = probe_futex_support();
-
-    // Cache the result atomically
-    let result = if supported {
-        FUTEX_SUPPORTED
-    } else {
-        FUTEX_UNSUPPORTED
-    };
-    FUTEX_SUPPORT.store(result, Ordering::Release);
-
-    supported
+    *FUTEX_SUPPORT.get_or_init(probe_futex_support)
 }
 
 /// Probe io_uring for futex operation support
@@ -255,7 +230,7 @@ impl IoUringWaiterQueue {
     /// The actual futex submission happens in the Future's poll() method.
     pub fn add_waiter_if<F>(&self, condition: F, _waker: Waker) -> bool
     where
-        F: FnOnce() -> bool,
+        F: Fn() -> bool,
     {
         // FAST PATH: Check condition first (pure userspace)
         if condition() {
@@ -266,6 +241,14 @@ impl IoUringWaiterQueue {
         // The Future's poll() method will handle submission
         // Just track that we have a waiter
         self.waiter_count.fetch_add(1, Ordering::Relaxed);
+
+        // Post-registration recheck to reduce lost-wake window
+        // (matches generic implementation pattern)
+        if condition() {
+            // Condition became true, remove our registration
+            self.waiter_count.fetch_sub(1, Ordering::Relaxed);
+            return true;
+        }
 
         false // Pending - Future will handle futex submission
     }
@@ -298,7 +281,8 @@ impl IoUringWaiterQueue {
         self.waiter_count.store(0, Ordering::Relaxed);
 
         // Submit futex wake operation to wake all waiters
-        let op = FutexWakeOp::new(Arc::clone(&self.futex), i32::MAX as u32);
+        // Use u32::MAX to wake all possible waiters
+        let op = FutexWakeOp::new(Arc::clone(&self.futex), u32::MAX);
         submit_futex_wake(op);
     }
 
