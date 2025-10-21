@@ -102,6 +102,44 @@ This semaphore is inspired by [`tokio::sync::Semaphore`](https://docs.rs/tokio/l
 | Async acquire | ✅ | ✅ |
 | Try acquire | ✅ | ✅ |
 
+## Development & Research
+
+### Lock-Free Wakeup Research
+
+We are actively researching and planning to eliminate mutexes from our synchronization primitives to achieve truly lock-free async wakeups. This work is documented in the [`docs/`](./docs/) directory:
+
+- **[Implementation Plan](./docs/implementation-plan-lockfree.md)** - Step-by-step guide for implementing lock-free wakeups
+- **[Research Document](./docs/mutex-free-wakeup-research.md)** - Comprehensive analysis of approaches (Tokio, Python asyncio, etc.)
+- **[Visual Comparison](./docs/wakeup-approaches-comparison.md)** - Side-by-side code comparisons and decision matrix
+- **[Docs Index](./docs/README.md)** - Complete documentation guide
+
+### Planned Improvements
+
+**Phase 1: parking_lot + AtomicWaker** (1-2 days)
+- Replace `std::sync::Mutex` with `parking_lot::Mutex`
+- Add `AtomicWaker` fast path for single-waiter scenarios
+- Expected: 20-30% performance improvement
+
+**Phase 2: crossbeam Lock-Free Queue** (1 week)
+- Replace mutex-based queue with `crossbeam-queue::SegQueue`
+- True lock-free operation
+- Expected: 40-60% performance improvement
+
+**Phase 3: Intrusive Lists** (Optional, 3-4 weeks)
+- Tokio-style intrusive linked lists
+- Zero allocations, maximum performance
+- Only if Phase 2 isn't sufficient
+
+See the [research docs](./docs/) for detailed analysis and trade-offs.
+
+## Contributing
+
+Contributions are welcome! Please see:
+
+- [Design documents](./docs/) for architecture and research
+- [Semaphore Design](./docs/semaphore-design.md) for current implementation
+- [Implementation Plan](./docs/implementation-plan-lockfree.md) for planned improvements
+
 ## License
 
 MIT

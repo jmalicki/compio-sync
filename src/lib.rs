@@ -31,6 +31,8 @@
 
 mod condvar;
 mod semaphore;
+
+// Platform-specific waiter queue implementation
 mod waiter_queue;
 
 pub use condvar::Condvar;

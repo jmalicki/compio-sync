@@ -2,54 +2,177 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, develop ]
   pull_request:
     branches: [ main ]
 
 env:
+  RUST_BACKTRACE: 1
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Test on multiple platforms
   test:
-    name: Test
+    name: Test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        rust: [stable, nightly]
+        include:
+          # Linux-specific configuration
+          - os: ubuntu-latest
+            platform_name: Linux
+            
+          # Windows-specific configuration
+          - os: windows-latest
+            platform_name: Windows
+            
+          # macOS-specific configuration
+          - os: macos-latest
+            platform_name: macOS
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust ${{ matrix.rust }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+          
+      - name: Cache cargo registry
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          
+      - name: Cache cargo index
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+          
+      - name: Cache target directory
+        uses: actions/cache@v3
+        with:
+          path: target
+          key: ${{ runner.os }}-target-${{ matrix.rust }}-${{ hashFiles('**/Cargo.lock') }}
+          
+      # Check kernel version on Linux
+      - name: Check Linux kernel version
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          echo "Kernel version:"
+          uname -r
+          echo "This will determine if io_uring futex operations are available (requires 6.7+)"
+        
+      # Check Windows version
+      - name: Check Windows version
+        if: matrix.os == 'windows-latest'
+        run: |
+          systeminfo | findstr /B /C:"OS Name" /C:"OS Version"
+        
+      - name: Build
+        run: cargo build --verbose --all-features
+        
+      - name: Run tests
+        run: cargo test --verbose --all-features
+        
+      - name: Run platform-specific tests (Linux)
+        if: matrix.os == 'ubuntu-latest' && matrix.rust == 'stable'
+        run: cargo test --test linux_specific --verbose
+        continue-on-error: true  # May not exist yet
+        
+      - name: Run platform-specific tests (Windows)
+        if: matrix.os == 'windows-latest' && matrix.rust == 'stable'
+        run: cargo test --test windows_specific --verbose
+        continue-on-error: true  # May not exist yet
+        
+      - name: Run doc tests
+        run: cargo test --doc --verbose
+        
+  # Stress tests (longer running)
+  stress:
+    name: Stress tests on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        
+      - name: Run stress tests
+        run: cargo test --release --test stress --verbose -- --test-threads=1 --nocapture
+        timeout-minutes: 30
+        continue-on-error: true  # May not exist yet
+        env:
+          STRESS_TEST_ITERATIONS: 100
+          
+  # Cross-compilation check
+  cross-compile:
+    name: Cross-compile check
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        rust: [stable, nightly]
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+          - x86_64-pc-windows-gnu
+          - x86_64-apple-darwin
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       
-      - uses: actions-rs/toolchain@v1
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ matrix.rust }}
-          override: true
+          targets: ${{ matrix.target }}
+          
+      - name: Check build for ${{ matrix.target }}
+        run: cargo check --target ${{ matrix.target }}
+        
+  # Linting
+  lint:
+    name: Lint and format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
           components: rustfmt, clippy
-      
-      - name: Build
-        run: cargo build --verbose --all-features
-      
-      - name: Run tests
-        run: cargo test --verbose --all-features
-      
-      - name: Clippy
-        run: cargo clippy --all-features -- -D warnings
-        if: matrix.rust == 'stable'
-      
-      - name: Format check
+          
+      - name: Check formatting
         run: cargo fmt -- --check
-        if: matrix.rust == 'stable'
-
+        
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+        
+  # Documentation
   docs:
     name: Documentation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        
       - name: Build docs
         run: cargo doc --no-deps --all-features
-
+        env:
+          RUSTDOCFLAGS: -D warnings
+          
+  # Summary
+  ci-success:
+    name: CI Success
+    needs: [test, stress, cross-compile, lint, docs]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report success
+        run: echo "All CI checks passed! ✅"

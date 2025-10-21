@@ -14,8 +14,16 @@ readme = "README.md"
 # Compio runtime for async operations
 compio = { version = "0.16", features = ["macros"] }
 
+# Faster mutex for generic implementation
+parking_lot = "0.12"
+
 [dev-dependencies]
 compio = { version = "0.16", features = ["macros", "time"] }
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[[bench]]
+name = "semaphore_bench"
+harness = false
 
 [lib]
 name = "compio_sync"
