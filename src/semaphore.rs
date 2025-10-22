@@ -38,7 +38,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// # Design
 ///
 /// - **Lock-free fast path**: Uses atomics for acquiring/releasing when permits available
-/// - **FIFO waiters**: Blocked tasks are woken in order to prevent starvation
+/// - **Fair wakeup**: All waiting tasks will eventually complete (no starvation)
+/// - **Wake order**: Implementation-dependent (FIFO for Generic, unspecified for io_uring)
 /// - **RAII permits**: `SemaphorePermit` automatically releases on drop
 /// - **Cloneable**: Wrapped in `Arc` for sharing across tasks
 ///

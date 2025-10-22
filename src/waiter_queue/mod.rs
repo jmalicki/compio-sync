@@ -63,9 +63,16 @@ pub trait WaiterQueueTrait {
         F: Fn() -> bool + Send + Sync + 'a;
 
     /// Wake one waiting task
+    ///
+    /// **Ordering**: Wake order is implementation-dependent and NOT guaranteed to be FIFO.
+    /// - Generic: FIFO (uses parking_lot queue)
+    /// - io_uring: Unspecified (kernel scheduling)
     fn wake_one(&self);
 
     /// Wake all waiting tasks
+    ///
+    /// **Ordering**: Wake order is implementation-dependent and NOT guaranteed to be FIFO.
+    /// All waiters will be woken, but in an unspecified order.
     fn wake_all(&self);
 
     /// Get the number of waiting tasks (for debugging/stats)

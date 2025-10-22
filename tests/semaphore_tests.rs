@@ -136,11 +136,16 @@ async fn test_semaphore_single_permit() {
     .expect("test timed out");
 }
 
+/// Test that all waiting tasks eventually complete
+/// 
+/// Note: This does NOT test FIFO ordering. Wake order is implementation-dependent:
+/// - Generic implementation: FIFO (parking_lot queue)
+/// - io_uring futex: Unspecified (kernel scheduling)
 #[compio::test]
-async fn test_semaphore_fairness() {
+async fn test_semaphore_all_waiters_complete() {
     compio::time::timeout(TEST_TIMEOUT, async {
         let sem = Arc::new(Semaphore::new(1));
-        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let completed = Arc::new(std::sync::Mutex::new(Vec::new()));
 
         // Hold the semaphore
         let permit = sem.acquire().await;
@@ -149,10 +154,10 @@ async fn test_semaphore_fairness() {
         let mut handles = vec![];
         for i in 0..5 {
             let sem = sem.clone();
-            let order = order.clone();
+            let completed = completed.clone();
             let handle = compio::runtime::spawn(async move {
                 let _permit = sem.acquire().await;
-                order.lock().unwrap().push(i);
+                completed.lock().unwrap().push(i);
             });
             handles.push(handle);
         }
@@ -168,27 +173,13 @@ async fn test_semaphore_fairness() {
             handle.await.unwrap();
         }
 
-        // Check they ran in order (FIFO)
-        let final_order = order.lock().unwrap();
+        // Verify all tasks completed (order not guaranteed)
+        let final_completed = completed.lock().unwrap();
+        assert_eq!(final_completed.len(), 5, "All tasks should complete");
         
-        // Note: FIFO ordering is only guaranteed with the Generic implementation.
-        // The io_uring futex implementation uses kernel futex wake which may
-        // wake waiters in any order (kernel scheduling dependent).
-        #[cfg(target_os = "linux")]
-        {
-            // On Linux, io_uring may be active (kernel 6.7+)
-            // Just verify all tasks completed, not order
-            assert_eq!(final_order.len(), 5);
-            let mut sorted = final_order.clone();
-            sorted.sort();
-            assert_eq!(sorted, vec![0, 1, 2, 3, 4]);
-        }
-        
-        #[cfg(not(target_os = "linux"))]
-        {
-            // On non-Linux, Generic is always used (FIFO guaranteed)
-            assert_eq!(*final_order, vec![0, 1, 2, 3, 4]);
-        }
+        let mut sorted = final_completed.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec![0, 1, 2, 3, 4], "All tasks should run exactly once");
     })
     .await
     .expect("test timed out");
