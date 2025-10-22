@@ -153,11 +153,13 @@ impl<W: WaiterQueueTrait> SemaphoreGeneric<W> {
                 return permit;
             }
 
-            // No permits - wait for notification
-            // Note: condition is || false because permits are checked separately
-            self.inner.waiters.add_waiter_if(|| false).await;
+            // No permits - register waiter and wait for release
+            // CRITICAL: Check permit availability during registration to prevent lost-wake race
+            // If permits become available after try_acquire() fails but before registration
+            // completes, the condition re-check will catch it and return immediately.
+            self.inner.waiters.add_waiter_if(|| self.available_permits() > 0).await;
 
-            // After wake, loop back to try_acquire (permits may have been released)
+            // After wake (or immediate return), loop back to try_acquire
         }
     }
 

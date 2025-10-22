@@ -41,7 +41,7 @@ pub use generic::WaiterQueue;
 ///
 /// This trait defines the interface that all platform-specific waiter queue
 /// implementations must satisfy.
-pub trait WaiterQueueTrait {
+pub trait WaiterQueueTrait: Sync {
     /// Create a new waiter queue
     fn new() -> Self;
 

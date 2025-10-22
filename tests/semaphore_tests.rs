@@ -244,12 +244,17 @@ async fn test_semaphore_api_methods() {
 /// This test attempts to trigger the race where:
 /// 1. Task tries to acquire (fails, no permits)
 /// 2. Permit is released in race window
-/// 3. Task registers waiter with || false (doesn't see available permit)
-/// 4. Task deadlocks
+/// 3. Task's condition re-check catches the released permit
+/// 4. Task completes successfully (no deadlock)
+///
+/// With the fix (|| permits > 0), this test should pass reliably.
 #[compio::test]
 async fn test_semaphore_lost_wake_race() {
     compio::time::timeout(TEST_TIMEOUT, async {
-        let sem = Arc::new(Semaphore::new(0));
+        let sem = Arc::new(Semaphore::new(1));
+        
+        // Hold the permit
+        let permit = sem.acquire().await;
         
         // Spawn a task that will try to acquire
         let sem_clone = sem.clone();
@@ -260,11 +265,11 @@ async fn test_semaphore_lost_wake_race() {
         // Yield to let the task start and fail try_acquire()
         compio::time::sleep(Duration::from_millis(1)).await;
         
-        // Add a permit - this races with add_waiter_if registration
-        // If the bug exists, the task might miss this permit
-        sem.add_permits(1);
+        // Release permit - this races with add_waiter_if registration
+        // The condition re-check should catch this
+        drop(permit);
         
-        // The task should complete (either caught in re-check or woken)
+        // The task should complete (caught in re-check or woken)
         // This will TIMEOUT if the lost-wake race occurs
         compio::time::timeout(Duration::from_millis(500), handle)
             .await
