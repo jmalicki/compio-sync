@@ -128,19 +128,16 @@ async fn test_wake_all_wakes_all_waiters() {
 /// - Generic/Windows: Returns approximate count (>0 when waiters exist, 0 after wake_all())
 /// - Linux io_uring: Panics (kernel manages waiters with no query API)
 ///
-
 // Additional tests to add once WaiterQueue is testable:
 // - Test concurrent add_waiter_if + wake_one (no data races)
 // - Test concurrent wake_all + wake_one (no double-wake)
 // - Test that Wakers can be called from any thread (Send + Sync)
 // - Test that dropping WaiterQueue doesn't leak waiters
-
 // ============================================================================
 // COMPREHENSIVE GENERIC WAITER QUEUE TESTS
 // ============================================================================
 // These tests provide comprehensive coverage of WaiterQueue behavior across
 // all platforms, with special attention to platform-specific edge cases.
-
 /// Test concurrent registration and wake operations (no data races)
 ///
 /// This test verifies that registering waiters while waking doesn't cause
