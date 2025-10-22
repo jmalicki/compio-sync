@@ -16,7 +16,6 @@ use std::sync::Arc;
 #[cfg(windows)]
 use std::pin::Pin;
 
-
 #[cfg(windows)]
 use std::os::windows::io::RawHandle;
 
@@ -62,7 +61,10 @@ impl WaiterQueue {
     }
 
     /// Add a waiter if condition is false
-    pub fn add_waiter_if<'a, F>(&'a self, condition: F) -> impl std::future::Future<Output = ()> + use<'a, F>
+    pub fn add_waiter_if<'a, F>(
+        &'a self,
+        condition: F,
+    ) -> impl std::future::Future<Output = ()> + use<'a, F>
     where
         F: Fn() -> bool + Send + Sync + 'a,
     {
