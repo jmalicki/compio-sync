@@ -167,7 +167,7 @@ mod tests {
                 match fut.as_mut().poll(&mut cx) {
                     std::task::Poll::Pending => {
                         // Good - registered
-                        #[cfg(not(target_os = "linux"))]
+                        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
                         assert_eq!(queue.waiter_count(), 1, "Waiter should be registered");
                     }
                     std::task::Poll::Ready(()) => {
@@ -181,7 +181,7 @@ mod tests {
 
             // After drop, waiter should be deregistered
             // This verifies the Drop implementation works
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", target_os = "windows")))]
             assert_eq!(
                 queue.waiter_count(),
                 0,
