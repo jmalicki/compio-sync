@@ -60,7 +60,7 @@ pub trait WaiterQueueTrait: Sync {
     /// thread-local. This is fine for compio's single-threaded runtime model.
     fn add_waiter_if<'a, F>(&'a self, condition: F) -> impl std::future::Future<Output = ()>
     where
-        F: Fn() -> bool + Send + Sync + 'a;
+        F: Fn() -> bool + Send + Sync + 'a + Unpin;
 
     /// Wake one waiting task
     ///

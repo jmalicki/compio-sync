@@ -113,7 +113,7 @@ impl WaiterQueue {
         condition: F,
     ) -> impl std::future::Future<Output = ()> + use<'a, F>
     where
-        F: Fn() -> bool + Send + Sync + 'a,
+        F: Fn() -> bool + Send + Sync + 'a + Unpin,
     {
         // Track where we registered for proper cleanup on drop
         enum RegistrationState {

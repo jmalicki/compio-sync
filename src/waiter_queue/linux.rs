@@ -72,7 +72,7 @@ impl WaiterQueue {
         condition: F,
     ) -> impl std::future::Future<Output = ()> + use<'a, F>
     where
-        F: Fn() -> bool + Send + Sync + 'a,
+        F: Fn() -> bool + Send + Sync + 'a + Unpin,
     {
         match self {
             WaiterQueue::IoUring(q) => {
@@ -281,7 +281,7 @@ impl IoUringWaiterQueue {
     /// thread-local in compio's runtime.
     pub fn add_waiter_if<F>(&self, condition: F) -> impl std::future::Future<Output = ()> + use<F>
     where
-        F: Fn() -> bool + Send + Sync,
+        F: Fn() -> bool + Send + Sync + Unpin,
     {
         let futex = Arc::clone(&self.futex);
 
