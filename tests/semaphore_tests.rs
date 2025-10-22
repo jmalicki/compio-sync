@@ -137,7 +137,7 @@ async fn test_semaphore_single_permit() {
 }
 
 /// Test that all waiting tasks eventually complete
-/// 
+///
 /// Note: This does NOT test FIFO ordering. Wake order is implementation-dependent:
 /// - Generic implementation: FIFO (parking_lot queue)
 /// - io_uring futex: Unspecified (kernel scheduling)
@@ -176,10 +176,14 @@ async fn test_semaphore_all_waiters_complete() {
         // Verify all tasks completed (order not guaranteed)
         let final_completed = completed.lock().unwrap();
         assert_eq!(final_completed.len(), 5, "All tasks should complete");
-        
+
         let mut sorted = final_completed.clone();
         sorted.sort();
-        assert_eq!(sorted, vec![0, 1, 2, 3, 4], "All tasks should run exactly once");
+        assert_eq!(
+            sorted,
+            vec![0, 1, 2, 3, 4],
+            "All tasks should run exactly once"
+        );
     })
     .await
     .expect("test timed out");
