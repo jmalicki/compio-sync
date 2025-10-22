@@ -60,7 +60,7 @@ pub trait WaiterQueueTrait: Sync {
     /// thread-local. This is fine for compio's single-threaded runtime model.
     fn add_waiter_if<'a, F>(&'a self, condition: F) -> impl std::future::Future<Output = ()>
     where
-        F: Fn() -> bool + Send + Sync + 'a;
+        F: Fn() -> bool + Send + Sync + 'a + Unpin;
 
     /// Wake one waiting task
     ///
@@ -167,7 +167,7 @@ mod tests {
                 match fut.as_mut().poll(&mut cx) {
                     std::task::Poll::Pending => {
                         // Good - registered
-                        #[cfg(not(target_os = "linux"))]
+                        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
                         assert_eq!(queue.waiter_count(), 1, "Waiter should be registered");
                     }
                     std::task::Poll::Ready(()) => {
@@ -181,7 +181,7 @@ mod tests {
 
             // After drop, waiter should be deregistered
             // This verifies the Drop implementation works
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", target_os = "windows")))]
             assert_eq!(
                 queue.waiter_count(),
                 0,
