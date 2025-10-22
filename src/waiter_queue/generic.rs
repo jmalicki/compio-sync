@@ -108,7 +108,10 @@ impl WaiterQueue {
     /// - Re-checks after registration to prevent lost wakeups
     ///
     /// Returns a future that completes when condition is true or waiter is woken.
-    pub fn add_waiter_if<F>(&self, condition: F) -> impl std::future::Future<Output = ()> + use<'_, F>
+    pub fn add_waiter_if<F>(
+        &self,
+        condition: F,
+    ) -> impl std::future::Future<Output = ()> + use<'_, F>
     where
         F: Fn() -> bool + Send + Sync,
     {

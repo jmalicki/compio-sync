@@ -63,7 +63,10 @@ impl WaiterQueue {
     }
 
     /// Add a waiter if condition is false
-    pub fn add_waiter_if<F>(&self, condition: F) -> impl std::future::Future<Output = ()> + use<'_, F>
+    pub fn add_waiter_if<F>(
+        &self,
+        condition: F,
+    ) -> impl std::future::Future<Output = ()> + use<'_, F>
     where
         F: Fn() -> bool + Send + Sync,
     {
