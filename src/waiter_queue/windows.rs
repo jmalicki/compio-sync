@@ -58,7 +58,7 @@ impl WaiterQueue {
         condition: F,
     ) -> impl std::future::Future<Output = ()> + use<'a, F>
     where
-        F: Fn() -> bool + Send + Sync + 'a,
+        F: Fn() -> bool + Send + Sync + 'a + Unpin,
     {
         match self {
             WaiterQueue::WaitOnAddress(q) => {
@@ -108,7 +108,7 @@ impl super::WaiterQueueTrait for WaiterQueue {
 
     fn add_waiter_if<'a, F>(&'a self, condition: F) -> impl std::future::Future<Output = ()>
     where
-        F: Fn() -> bool + Send + Sync + 'a,
+        F: Fn() -> bool + Send + Sync + 'a + Unpin,
     {
         WaiterQueue::add_waiter_if(self, condition)
     }
