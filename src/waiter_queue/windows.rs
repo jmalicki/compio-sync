@@ -207,8 +207,8 @@ struct EventHandle {
 #[cfg(windows)]
 impl EventHandle {
     fn new() -> io::Result<Self> {
-        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
         use windows_sys::Win32::Foundation::CreateEventW;
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
 
         unsafe {
             let handle = CreateEventW(
