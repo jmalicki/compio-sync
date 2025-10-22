@@ -274,7 +274,7 @@ impl IoUringWaiterQueue {
     pub fn add_waiter_if<F>(
         &self,
         condition: F,
-    ) -> impl std::future::Future<Output = ()> + Send + use<F, Self>
+    ) -> impl std::future::Future<Output = ()> + Send + use<F>
     where
         F: Fn() -> bool + Send + Sync,
     {
