@@ -89,6 +89,7 @@ jobs:
           - ubuntu-22.04  # Kernel 5.15 - tests generic fallback path
           - windows-2022  # Windows - tests IOCP event integration
           - windows-7     # Windows 7 - tests generic fallback on older Windows
+          - macos-14      # macOS - tests generic fallback on macOS
         rust: [stable, nightly]
     steps:
       - uses: actions/checkout@v4
@@ -132,6 +133,7 @@ jobs:
           - ubuntu-22.04  # Kernel 5.15 - tests generic fallback path
           - windows-2022  # Windows - tests IOCP event integration
           - windows-7     # Windows 7 - tests generic fallback on older Windows
+          - macos-14      # macOS - tests generic fallback on macOS
         rust: [stable, nightly]
     steps:
       - uses: actions/checkout@v4
@@ -156,6 +158,10 @@ jobs:
           elif [[ "${{ matrix.os }}" == "windows-7" ]]; then
             echo "Windows 7 version:"
             echo "Testing generic fallback on older Windows"
+          elif [[ "${{ matrix.os }}" == "macos-14" ]]; then
+            echo "macOS version:"
+            sw_vers -productVersion
+            echo "Testing generic fallback on macOS"
           else
             echo "Kernel version:"
             uname -r
