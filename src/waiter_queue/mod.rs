@@ -144,12 +144,11 @@ mod tests {
     /// 2. Spurious wakes (dead future's waker called)
     #[compio::test]
     async fn test_future_drop_deregisters_waiter() {
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::future::Future;
         use std::sync::Arc;
 
         compio::time::timeout(std::time::Duration::from_secs(5), async {
             let queue = Arc::new(WaiterQueue::new());
-            let was_woken = Arc::new(AtomicBool::new(false));
 
             // Verify queue starts empty
             #[cfg(not(target_os = "linux"))]
@@ -157,7 +156,7 @@ mod tests {
 
             // Create a dummy waker for polling
             let waker = std::task::Waker::noop();
-            let mut cx = std::task::Context::from_waker(&waker);
+            let mut cx = std::task::Context::from_waker(waker);
 
             // Create and poll future, then drop it
             {
@@ -165,7 +164,6 @@ mod tests {
                 let mut fut = Box::pin(queue_clone.add_waiter_if(|| false));
 
                 // Poll once to register
-                use std::future::Future;
                 match fut.as_mut().poll(&mut cx) {
                     std::task::Poll::Pending => {
                         // Good - registered
