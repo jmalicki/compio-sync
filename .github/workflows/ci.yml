@@ -157,6 +157,7 @@ jobs:
             uname -r
             echo "Expected: 6.7+ for io_uring futex support"
           fi
+        shell: bash
       
       - name: Run tests
         run: cargo test --verbose --all-features
