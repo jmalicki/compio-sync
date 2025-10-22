@@ -45,30 +45,34 @@ pub trait WaiterQueueTrait {
     /// Create a new waiter queue
     fn new() -> Self;
 
-    /// Poll to add a waiter to the queue if condition is false (atomic check-and-add)
+    /// Add a waiter to the queue if condition is false (atomic check-and-add)
     ///
-    /// This is a poll-based method to allow platform-specific implementations (like io_uring)
-    /// to submit async operations. Generic implementation returns Poll::Ready immediately.
+    /// Completes when either:
+    /// - Condition was already true (fast path, no registration)
+    /// - Waiter was registered and subsequently woken
     ///
-    /// Idempotency: Implementations must handle repeated polls safely (no duplicate enqueues
-    /// for the same task) and should update the stored waker on re-poll.
+    /// After awaiting, caller should re-check the actual condition.
     ///
-    /// Returns:
-    /// - `Poll::Ready(true)`: condition was true (no waiter enqueued)
-    /// - `Poll::Ready(false)`: condition was false (waiter enqueued; caller must return Pending)
-    /// - `Poll::Pending`: the operation itself is pending (e.g., io_uring submission)
-    fn poll_add_waiter_if<F>(
-        &self,
-        condition: F,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<bool>
+    /// For io_uring, can return submit() future directly.
+    /// For generic, returns immediately-ready future.
+    ///
+    /// **Note**: The returned future is `!Send` because io_uring operations are
+    /// thread-local. This is fine for compio's single-threaded runtime model.
+    fn add_waiter_if<'a, F>(&'a self, condition: F) -> impl std::future::Future<Output = ()>
     where
-        F: Fn() -> bool;
+        F: Fn() -> bool + Send + Sync + 'a;
 
     /// Wake one waiting task
+    ///
+    /// **Ordering**: Wake order is implementation-dependent and NOT guaranteed to be FIFO.
+    /// - Generic: FIFO (uses parking_lot queue)
+    /// - io_uring: Unspecified (kernel scheduling)
     fn wake_one(&self);
 
     /// Wake all waiting tasks
+    ///
+    /// **Ordering**: Wake order is implementation-dependent and NOT guaranteed to be FIFO.
+    /// All waiters will be woken, but in an unspecified order.
     fn wake_all(&self);
 
     /// Get the number of waiting tasks (for debugging/stats)
@@ -90,36 +94,33 @@ mod tests {
     async fn test_add_waiter_if_condition_true() {
         let queue = WaiterQueue::new();
 
-        // Condition is true - should NOT add waiter
-        let added = std::future::poll_fn(|cx| queue.poll_add_waiter_if(|| true, cx)).await;
-        assert!(added, "Should return true when condition is true");
+        // Condition is true - should complete immediately
+        queue.add_waiter_if(|| true).await;
+        // If we got here, the future completed (which is correct for true condition)
     }
 
     #[compio::test]
     async fn test_add_waiter_if_condition_false() {
-        let queue = WaiterQueue::new();
+        let queue = std::sync::Arc::new(WaiterQueue::new());
+        let queue_clone = queue.clone();
 
-        // Condition is false - should add waiter
-        let added = std::future::poll_fn(|cx| queue.poll_add_waiter_if(|| false, cx)).await;
-        assert!(!added, "Should return false when condition is false");
-    }
+        // Condition is false - will register and pend
+        // We need to wake it to complete
+        let handle = compio::runtime::spawn(async move {
+            queue_clone.add_waiter_if(|| false).await;
+        });
 
-    #[compio::test]
-    async fn test_add_waiter_idempotent_on_repoll() {
-        let queue = WaiterQueue::new();
+        // Give it time to register
+        compio::time::sleep(std::time::Duration::from_millis(10)).await;
 
-        // Register waiter
-        let added1 = std::future::poll_fn(|cx| queue.poll_add_waiter_if(|| false, cx)).await;
-        assert!(!added1, "First poll should register waiter");
+        // Wake it
+        queue.wake_one();
 
-        // Note: In real usage, we wouldn't re-poll after Ready(false).
-        // But this tests that implementation handles it safely if it happens.
-        // Since AtomicWaker.register() updates in-place, count should still be 1.
-        assert_eq!(
-            queue.waiter_count(),
-            1,
-            "Should have exactly 1 waiter after registration"
-        );
+        // Should complete now
+        compio::time::timeout(std::time::Duration::from_millis(100), handle)
+            .await
+            .expect("Should complete after wake")
+            .expect("Task should succeed");
     }
 
     #[test]
@@ -134,5 +135,60 @@ mod tests {
         let queue = WaiterQueue::new();
         // Should not panic when waking all with no waiters
         queue.wake_all();
+    }
+
+    /// Test that dropping a pending future properly deregisters the waker
+    ///
+    /// This prevents:
+    /// 1. Memory leaks (waker stays in queue)
+    /// 2. Spurious wakes (dead future's waker called)
+    #[compio::test]
+    async fn test_future_drop_deregisters_waiter() {
+        use std::future::Future;
+        use std::sync::Arc;
+
+        compio::time::timeout(std::time::Duration::from_secs(5), async {
+            let queue = Arc::new(WaiterQueue::new());
+
+            // Verify queue starts empty
+            #[cfg(not(target_os = "linux"))]
+            assert_eq!(queue.waiter_count(), 0);
+
+            // Create a dummy waker for polling
+            let waker = std::task::Waker::noop();
+            let mut cx = std::task::Context::from_waker(waker);
+
+            // Create and poll future, then drop it
+            {
+                let queue_clone = queue.clone();
+                let mut fut = Box::pin(queue_clone.add_waiter_if(|| false));
+
+                // Poll once to register
+                match fut.as_mut().poll(&mut cx) {
+                    std::task::Poll::Pending => {
+                        // Good - registered
+                        #[cfg(not(target_os = "linux"))]
+                        assert_eq!(queue.waiter_count(), 1, "Waiter should be registered");
+                    }
+                    std::task::Poll::Ready(()) => {
+                        panic!("Future should not complete with || false");
+                    }
+                }
+
+                // Drop the future (goes out of scope)
+                // Drop impl should deregister
+            }
+
+            // After drop, waiter should be deregistered
+            // This verifies the Drop implementation works
+            #[cfg(not(target_os = "linux"))]
+            assert_eq!(
+                queue.waiter_count(),
+                0,
+                "Waiter should be deregistered after drop"
+            );
+        })
+        .await
+        .expect("Test timed out");
     }
 }

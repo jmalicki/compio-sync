@@ -30,13 +30,26 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
       
+      # Install cross-compilation targets for checking all platform-specific code
+      - name: Install cross-compilation targets
+        run: |
+          rustup target add x86_64-unknown-linux-gnu
+          rustup target add x86_64-pc-windows-msvc
+          rustup target add x86_64-apple-darwin
+      
       # Check formatting first (fastest check)
       - name: Check formatting
         run: cargo fmt --all -- --check
       
-      # Run clippy (uses sccache for compilation)
-      - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+      # Run clippy for all platforms to check all cfg() branches
+      - name: Run clippy (Linux)
+        run: cargo clippy --target x86_64-unknown-linux-gnu --all-targets --all-features -- -D warnings
+      
+      - name: Run clippy (Windows)
+        run: cargo clippy --target x86_64-pc-windows-msvc --all-targets --all-features -- -D warnings
+      
+      - name: Run clippy (macOS)
+        run: cargo clippy --target x86_64-apple-darwin --all-targets --all-features -- -D warnings
       
       - name: Show sccache statistics
         run: sccache --show-stats
@@ -71,7 +84,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
+        os: 
+          - ubuntu-24.04  # Kernel 6.11 - tests io_uring futex path (requires 6.7+)
+          - ubuntu-22.04  # Kernel 5.15 - tests generic fallback path
         rust: [stable, nightly]
         # Future: add windows-latest, macos-latest when platform-specific code is ready
     steps:
@@ -81,6 +96,13 @@ jobs:
         uses: ./.github/actions/setup-rust-sccache
         with:
           toolchain: ${{ matrix.rust }}
+      
+      # Workaround for sccache/cache corruption on ubuntu-22.04 stable
+      - name: Clean and disable sccache for ubuntu-22.04 stable
+        if: matrix.os == 'ubuntu-22.04' && matrix.rust == 'stable'
+        run: |
+          cargo clean
+          echo "RUSTC_WRAPPER=" >> $GITHUB_ENV
       
       - name: Build library
         run: cargo build --verbose --all-features
@@ -104,7 +126,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
+        os:
+          - ubuntu-24.04  # Kernel 6.11 - tests io_uring futex path (requires 6.7+)
+          - ubuntu-22.04  # Kernel 5.15 - tests generic fallback path
         rust: [stable, nightly]
     steps:
       - uses: actions/checkout@v4
@@ -113,6 +137,19 @@ jobs:
         uses: ./.github/actions/setup-rust-sccache
         with:
           toolchain: ${{ matrix.rust }}
+      
+      # Workaround for sccache/cache corruption on ubuntu-22.04 stable
+      - name: Clean and disable sccache for ubuntu-22.04 stable
+        if: matrix.os == 'ubuntu-22.04' && matrix.rust == 'stable'
+        run: |
+          cargo clean
+          echo "RUSTC_WRAPPER=" >> $GITHUB_ENV
+      
+      - name: Check kernel version (verify io_uring futex support)
+        run: |
+          echo "Kernel version:"
+          uname -r
+          echo "Expected: 6.7+ for io_uring futex support"
       
       - name: Run tests
         run: cargo test --verbose --all-features

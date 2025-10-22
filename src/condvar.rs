@@ -30,7 +30,6 @@
 
 use crate::waiter_queue::{WaiterQueue, WaiterQueueTrait};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::task::Poll;
 
 /// A compio-compatible async condition variable for task notification
 ///
@@ -156,18 +155,18 @@ impl<W: WaiterQueueTrait + Sync> CondvarGeneric<W> {
     /// # }
     /// ```
     pub async fn wait(&self) {
-        // Simple poll_fn wrapper around poll_add_waiter_if
-        std::future::poll_fn(|cx| {
-            match self
-                .inner
+        loop {
+            // Wait for notification
+            self.inner
                 .waiters
-                .poll_add_waiter_if(|| self.inner.notified.load(Ordering::Acquire), cx)
-            {
-                Poll::Ready(true) => Poll::Ready(()),
-                Poll::Ready(false) | Poll::Pending => Poll::Pending,
+                .add_waiter_if(|| self.inner.notified.load(Ordering::Acquire))
+                .await;
+
+            // Re-check condition after wake
+            if self.inner.notified.load(Ordering::Acquire) {
+                break;
             }
-        })
-        .await
+        }
     }
 
     /// Notify one waiting task
