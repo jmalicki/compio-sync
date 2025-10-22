@@ -158,12 +158,12 @@ mod tests {
             // Create a dummy waker for polling
             let waker = std::task::Waker::noop();
             let mut cx = std::task::Context::from_waker(&waker);
-            
+
             // Create and poll future, then drop it
             {
                 let queue_clone = queue.clone();
                 let mut fut = Box::pin(queue_clone.add_waiter_if(|| false));
-                
+
                 // Poll once to register
                 use std::future::Future;
                 match fut.as_mut().poll(&mut cx) {
@@ -176,11 +176,11 @@ mod tests {
                         panic!("Future should not complete with || false");
                     }
                 }
-                
+
                 // Drop the future (goes out of scope)
                 // Drop impl should deregister
             }
-            
+
             // After drop, waiter should be deregistered
             // This verifies the Drop implementation works
             #[cfg(not(target_os = "linux"))]
