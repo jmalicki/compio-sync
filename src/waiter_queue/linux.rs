@@ -221,19 +221,24 @@ fn submit_futex_wake(op: FutexWakeOp) {
 
     if !in_runtime {
         // Not in runtime context (e.g., sync test calling drop())
-        // CRITICAL: Must issue direct syscall or waiters will hang!
-        // Futex value increment alone doesn't wake - need explicit FUTEX_WAKE syscall
+        // CRITICAL: Must use futex2 syscall to wake io_uring futex waiters!
+        // 
+        // io_uring FUTEX_WAIT/WAKE use futex2 API, NOT legacy futex.
+        // Using legacy SYS_futex(FUTEX_WAKE) is incompatible and won't wake futex2 waiters.
         #[cfg(target_os = "linux")]
         unsafe {
-            let futex_ptr = Arc::as_ptr(&op.futex) as *const u32;
+            // sys_futex_wake (futex2) - syscall 454 on x86_64
+            // Available since Linux 6.7 (same as io_uring futex support)
+            const SYS_FUTEX_WAKE: libc::c_long = 454;
+            
+            let futex_ptr = Arc::as_ptr(&op.futex) as *mut u32;
             libc::syscall(
-                libc::SYS_futex,
-                futex_ptr,
-                libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
-                op.count as libc::c_int,
-                std::ptr::null::<libc::timespec>(),
-                std::ptr::null::<u32>(),
-                0,
+                SYS_FUTEX_WAKE,
+                futex_ptr,                    // uaddr
+                op.count as libc::c_uint,    // nr_wake
+                u64::MAX as libc::c_ulong,   // mask (match all bits)
+                0 as libc::c_uint,           // flags (FUTEX2_PRIVATE is default)
+                0 as libc::c_uint,           // val3 (unused)
             );
         }
         return;
