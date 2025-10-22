@@ -84,7 +84,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
+        os: 
+          - ubuntu-24.04  # Kernel 6.11 - tests io_uring futex path (requires 6.7+)
+          - ubuntu-22.04  # Kernel 5.15 - tests generic fallback path
         rust: [stable, nightly]
         # Future: add windows-latest, macos-latest when platform-specific code is ready
     steps:
@@ -117,7 +119,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
+        os:
+          - ubuntu-24.04  # Kernel 6.11 - tests io_uring futex path (requires 6.7+)
+          - ubuntu-22.04  # Kernel 5.15 - tests generic fallback path
         rust: [stable, nightly]
     steps:
       - uses: actions/checkout@v4
@@ -126,6 +130,12 @@ jobs:
         uses: ./.github/actions/setup-rust-sccache
         with:
           toolchain: ${{ matrix.rust }}
+      
+      - name: Check kernel version (verify io_uring futex support)
+        run: |
+          echo "Kernel version:"
+          uname -r
+          echo "Expected: 6.7+ for io_uring futex support"
       
       - name: Run tests
         run: cargo test --verbose --all-features
