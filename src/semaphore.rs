@@ -673,4 +673,158 @@ mod tests {
         .await
         .expect("Test timed out");
     }
+    
+    /// Test that acquire() takes exactly one permit when multiple are available
+    /// 
+    /// This verifies that even if multiple permits become available during
+    /// registration, acquire() only takes one permit (not all of them).
+    #[compio::test]
+    async fn test_mock_multiple_permits_released() {
+        compio::time::timeout(std::time::Duration::from_secs(2), async {
+            let sem = Arc::new(SemaphoreGeneric::<MockWaiterQueue>::new(1));
+            
+            // Take the permit (permits = 0)
+            let _permit = sem.acquire().await;
+            
+            // Set up mock to release MULTIPLE permits during registration
+            let sem_clone = sem.clone();
+            (&sem.inner.waiters).set_on_add_waiter(move || {
+                // Release 5 permits at once
+                sem_clone.inner.permits.fetch_add(5, Ordering::Release);
+            });
+            
+            // Acquire should take exactly 1 permit, leaving 4
+            let _acquired = compio::time::timeout(
+                std::time::Duration::from_millis(500),
+                sem.acquire()
+            )
+            .await
+            .expect("Should not timeout");
+            
+            // Verify only 1 permit was taken (4 remain)
+            assert_eq!(sem.available_permits(), 4, "Should have taken exactly 1 permit");
+        })
+        .await
+        .expect("Test timed out");
+    }
+    
+    /// Test explicit wake_one() during registration is safe
+    /// 
+    /// This verifies that calling wake_one() during add_waiter_if registration
+    /// doesn't cause issues (no double-wake, no lost permits).
+    #[compio::test]
+    async fn test_mock_wake_during_registration() {
+        compio::time::timeout(std::time::Duration::from_secs(2), async {
+            let sem = Arc::new(SemaphoreGeneric::<MockWaiterQueue>::new(1));
+            
+            // Take the permit (permits = 0)
+            let _permit = sem.acquire().await;
+            
+            // Set up mock to release permit AND explicitly wake during registration
+            let sem_clone = sem.clone();
+            (&sem.inner.waiters).set_on_add_waiter(move || {
+                // Release permit
+                sem_clone.inner.permits.fetch_add(1, Ordering::Release);
+                // Explicitly wake (might be redundant with re-check, but should be safe)
+                sem_clone.inner.waiters.wake_one();
+            });
+            
+            // Should complete without issues
+            let _acquired = compio::time::timeout(
+                std::time::Duration::from_millis(500),
+                sem.acquire()
+            )
+            .await
+            .expect("Should not timeout - wake + re-check should work");
+            
+            // Verify permit was consumed
+            assert_eq!(sem.available_permits(), 0, "Permit should be consumed");
+        })
+        .await
+        .expect("Test timed out");
+    }
+    
+    /// Test permit stolen by another thread during registration
+    /// 
+    /// This verifies retry logic: if a permit appears but is stolen before
+    /// we can acquire it, the task correctly stays pending.
+    #[compio::test]
+    async fn test_mock_permit_stolen() {
+        compio::time::timeout(std::time::Duration::from_secs(2), async {
+            let sem = Arc::new(SemaphoreGeneric::<MockWaiterQueue>::new(1));
+            
+            // Take the permit (permits = 0)
+            let _permit = sem.acquire().await;
+            
+            // Set up mock to release permit then immediately steal it back
+            let sem_clone = sem.clone();
+            (&sem.inner.waiters).set_on_add_waiter(move || {
+                // Release permit
+                sem_clone.inner.permits.fetch_add(1, Ordering::Release);
+                // Immediately steal it back (simulates another thread taking it)
+                sem_clone.inner.permits.fetch_sub(1, Ordering::Acquire);
+            });
+            
+            // Try to acquire - should timeout since permit is stolen
+            let acquire_result = compio::time::timeout(
+                std::time::Duration::from_millis(200),
+                sem.acquire()
+            )
+            .await;
+            
+            // Should timeout (permit was stolen, we stay pending)
+            assert!(
+                acquire_result.is_err(),
+                "Should timeout - permit was stolen, task should stay pending"
+            );
+            
+            // Now release a permit for real to unblock
+            drop(_permit);
+            
+            // Should be able to acquire now
+            let _acquired = compio::time::timeout(
+                std::time::Duration::from_millis(500),
+                sem.acquire()
+            )
+            .await
+            .expect("Should acquire after real release");
+        })
+        .await
+        .expect("Test timed out");
+    }
+    
+    /// Sanity check that MockWaiterQueue works correctly for normal operations
+    /// 
+    /// This verifies the mock properly delegates to the real implementation
+    /// when no hook is set.
+    #[compio::test]
+    async fn test_mock_normal_operation() {
+        compio::time::timeout(std::time::Duration::from_secs(2), async {
+            let sem = Arc::new(SemaphoreGeneric::<MockWaiterQueue>::new(3));
+            
+            // Normal acquire/release without any hooks
+            let permit1 = sem.acquire().await;
+            assert_eq!(sem.available_permits(), 2);
+            
+            let permit2 = sem.acquire().await;
+            assert_eq!(sem.available_permits(), 1);
+            
+            drop(permit1);
+            assert_eq!(sem.available_permits(), 2);
+            
+            let permit3 = sem.acquire().await;
+            assert_eq!(sem.available_permits(), 1);
+            
+            drop(permit2);
+            drop(permit3);
+            assert_eq!(sem.available_permits(), 3);
+            
+            // Verify try_acquire works
+            let permit = sem.try_acquire();
+            assert!(permit.is_some());
+            assert_eq!(sem.available_permits(), 2);
+        })
+        .await
+        .expect("Test timed out");
+    }
 }
