@@ -58,9 +58,9 @@ pub trait WaiterQueueTrait {
     ///
     /// **Note**: The returned future is `!Send` because io_uring operations are
     /// thread-local. This is fine for compio's single-threaded runtime model.
-    fn add_waiter_if<F>(&self, condition: F) -> impl std::future::Future<Output = ()>
+    fn add_waiter_if<'a, F>(&'a self, condition: F) -> impl std::future::Future<Output = ()>
     where
-        F: Fn() -> bool + Send + Sync;
+        F: Fn() -> bool + Send + Sync + 'a;
 
     /// Wake one waiting task
     fn wake_one(&self);

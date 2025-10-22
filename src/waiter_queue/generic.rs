@@ -108,12 +108,12 @@ impl WaiterQueue {
     /// - Re-checks after registration to prevent lost wakeups
     ///
     /// Returns a future that completes when condition is true or waiter is woken.
-    pub fn add_waiter_if<F>(
-        &self,
+    pub fn add_waiter_if<'a, F>(
+        &'a self,
         condition: F,
-    ) -> impl std::future::Future<Output = ()> + use<'_, F>
+    ) -> impl std::future::Future<Output = ()> + use<'a, F>
     where
-        F: Fn() -> bool + Send + Sync,
+        F: Fn() -> bool + Send + Sync + 'a,
     {
         // Use a struct to track if we've registered across polls
         struct AddWaiterFuture<'a, F> {
@@ -358,9 +358,9 @@ impl WaiterQueueTrait for WaiterQueue {
         WaiterQueue::new()
     }
 
-    fn add_waiter_if<F>(&self, condition: F) -> impl std::future::Future<Output = ()>
+    fn add_waiter_if<'a, F>(&'a self, condition: F) -> impl std::future::Future<Output = ()>
     where
-        F: Fn() -> bool + Send + Sync,
+        F: Fn() -> bool + Send + Sync + 'a,
     {
         WaiterQueue::add_waiter_if(self, condition)
     }

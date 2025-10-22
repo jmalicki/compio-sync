@@ -116,9 +116,9 @@ impl super::WaiterQueueTrait for WaiterQueue {
         WaiterQueue::new()
     }
 
-    fn add_waiter_if<F>(&self, condition: F) -> impl std::future::Future<Output = ()>
+    fn add_waiter_if<'a, F>(&'a self, condition: F) -> impl std::future::Future<Output = ()>
     where
-        F: Fn() -> bool + Send + Sync,
+        F: Fn() -> bool + Send + Sync + 'a,
     {
         WaiterQueue::add_waiter_if(self, condition)
     }
