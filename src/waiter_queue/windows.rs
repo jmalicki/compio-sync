@@ -19,7 +19,6 @@ use std::pin::Pin;
 #[cfg(windows)]
 use std::os::windows::io::RawHandle;
 
-
 /// Global cached result of WaitOnAddress support detection
 /// 0 = not checked yet, 1 = not supported, 2 = supported
 static WAITONADDRESS_SUPPORT: AtomicU8 = AtomicU8::new(0);
