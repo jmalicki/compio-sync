@@ -12,6 +12,7 @@ use compio_sync::WaiterQueue;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Wake, Waker};
+use std::time::Duration;
 
 /// Custom waker for testing
 #[allow(dead_code)]
@@ -119,20 +120,6 @@ async fn test_wake_all_wakes_all_waiters() {
     );
 }
 
-/// Test that wake_one() wakes exactly one waiter
-///
-/// Verifies wake_one() doesn't accidentally wake multiple waiters.
-///
-/// **Requirement:** Exactly ONE waiter should be woken per wake_one() call.
-#[test]
-#[ignore = "WaiterQueue not yet exposed for testing - will be enabled in implementation PR"]
-fn test_wake_one_wakes_single_waiter() {
-    // Expected behavior:
-    // 1. Create WaiterQueue
-    // 2. Add N waiters with condition=false
-    // 3. Call wake_one()
-    // 4. Verify exactly 1 waker was woken (not 0, not >1)
-}
 
 /// Test waiter count tracking
 ///
@@ -156,36 +143,7 @@ fn test_waiter_count_tracking() {
     //   - Consider #[cfg] gating or catch_unwind for this platform
 }
 
-/// Test that condition=true skips wait (fast path)
-///
-/// When the condition is true, no waiter should be added.
-///
-/// **Requirement:** add_waiter_if(|| true, waker) returns true immediately,
-/// no waiter registered, waker never called.
-#[test]
-#[ignore = "WaiterQueue not yet exposed for testing - will be enabled in implementation PR"]
-fn test_condition_true_skips_wait() {
-    // Expected behavior:
-    // 1. Call add_waiter_if(|| true, waker)
-    // 2. Returns true immediately
-    // 3. waiter_count() == 0
-    // 4. waker not invoked
-}
 
-/// Test that condition=false adds waiter (slow path)
-///
-/// When the condition is false, a waiter should be added.
-///
-/// **Requirement:** add_waiter_if(|| false, waker) returns false,
-/// waiter is registered for later waking.
-#[test]
-#[ignore = "WaiterQueue not yet exposed for testing - will be enabled in implementation PR"]
-fn test_condition_false_adds_waiter() {
-    // Expected behavior:
-    // 1. Call add_waiter_if(|| false, waker)
-    // 2. Returns false (wait needed)
-    // 3. waiter_count() > 0
-}
 
 /// Stress test: Many waiters with wake_all
 ///
@@ -204,44 +162,406 @@ fn test_wake_all_many_waiters() {
     // This is a CRITICAL test for Windows IOCP implementation.
 }
 
-/// Test multiple wake_one calls wake multiple waiters
-///
-/// Verifies that calling wake_one() N times wakes N waiters.
-#[test]
-#[ignore = "WaiterQueue not yet exposed for testing - will be enabled in implementation PR"]
-fn test_multiple_wake_one_calls() {
-    // Expected behavior:
-    // 1. Add 5 waiters
-    // 2. Call wake_one() 3 times
-    // 3. Verify exactly 3 waiters were woken
-}
 
-/// Test wake_all with no waiters doesn't panic
-///
-/// Calling wake_all() with no waiters should be a no-op.
-#[test]
-#[ignore = "WaiterQueue not yet exposed for testing - will be enabled in implementation PR"]
-fn test_wake_all_no_waiters() {
-    // Expected behavior:
-    // 1. Create empty WaiterQueue
-    // 2. Call wake_all()
-    // 3. No panic, no-op
-}
 
-/// Test wake_one with no waiters doesn't panic
-///
-/// Calling wake_one() with no waiters should be a no-op.
-#[test]
-#[ignore = "WaiterQueue not yet exposed for testing - will be enabled in implementation PR"]
-fn test_wake_one_no_waiters() {
-    // Expected behavior:
-    // 1. Create empty WaiterQueue
-    // 2. Call wake_one()
-    // 3. No panic, no-op
-}
 
 // Additional tests to add once WaiterQueue is testable:
 // - Test concurrent add_waiter_if + wake_one (no data races)
 // - Test concurrent wake_all + wake_one (no double-wake)
 // - Test that Wakers can be called from any thread (Send + Sync)
 // - Test that dropping WaiterQueue doesn't leak waiters
+
+// ============================================================================
+// COMPREHENSIVE GENERIC WAITER QUEUE TESTS
+// ============================================================================
+// These tests provide comprehensive coverage of WaiterQueue behavior across
+// all platforms, with special attention to platform-specific edge cases.
+
+/// Test concurrent registration and wake operations (no data races)
+///
+/// This test verifies that registering waiters while waking doesn't cause
+/// data races or lost wakeups.
+///
+/// **Inspiration:** Event-based implementations (like Windows IOCP) can have
+/// race conditions between event signaling and waiter registration if not
+/// properly synchronized.
+#[compio::test]
+async fn test_concurrent_registration_and_wake() {
+    compio::time::timeout(Duration::from_secs(5), async {
+        let queue = Arc::new(WaiterQueue::new());
+        let woken_count = Arc::new(AtomicUsize::new(0));
+        
+        // Spawn multiple tasks that register waiters
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let queue_clone = queue.clone();
+            let count_clone = woken_count.clone();
+            let handle = compio::runtime::spawn(async move {
+                queue_clone.add_waiter_if(|| false).await;
+                count_clone.fetch_add(1, Ordering::SeqCst);
+            });
+            handles.push(handle);
+        }
+        
+        // Give time for some registration
+        compio::time::sleep(Duration::from_millis(5)).await;
+        
+        // Wake some while others are still registering
+        queue.wake_one();
+        queue.wake_one();
+        
+        // Wait for all
+        for handle in handles {
+            handle.await.unwrap();
+        }
+        
+        assert_eq!(woken_count.load(Ordering::SeqCst), 10);
+    })
+    .await
+    .expect("test timed out");
+}
+
+/// Test mixed wake operations (no double-wake)
+///
+/// Verifies that mixing wake_all() and wake_one() calls doesn't cause
+/// double-waking or missed wakeups.
+///
+/// **Inspiration:** Event-based implementations can have tricky state
+/// management when mixing different wake operations.
+#[compio::test]
+async fn test_mixed_wake_operations() {
+    compio::time::timeout(Duration::from_secs(5), async {
+        let queue = Arc::new(WaiterQueue::new());
+        let woken_count = Arc::new(AtomicUsize::new(0));
+        
+        // Add waiters
+        let mut handles = Vec::new();
+        for _ in 0..5 {
+            let queue_clone = queue.clone();
+            let count_clone = woken_count.clone();
+            let handle = compio::runtime::spawn(async move {
+                queue_clone.add_waiter_if(|| false).await;
+                count_clone.fetch_add(1, Ordering::SeqCst);
+            });
+            handles.push(handle);
+        }
+        
+        compio::time::sleep(Duration::from_millis(10)).await;
+        
+        // Mix wake operations
+        queue.wake_one();  // Should wake 1
+        queue.wake_all();  // Should wake remaining 4
+        queue.wake_one();  // Should be no-op
+        
+        for handle in handles {
+            handle.await.unwrap();
+        }
+        
+        assert_eq!(woken_count.load(Ordering::SeqCst), 5);
+    })
+    .await
+    .expect("test timed out");
+}
+
+/// Test that wake_one() wakes exactly one waiter
+///
+/// Verifies wake_one() doesn't accidentally wake multiple waiters.
+///
+/// **Requirement:** Exactly ONE waiter should be woken per wake_one() call.
+#[compio::test]
+async fn test_wake_one_wakes_single_waiter() {
+    compio::time::timeout(Duration::from_secs(5), async {
+        let queue = Arc::new(WaiterQueue::new());
+        let woken_count = Arc::new(AtomicUsize::new(0));
+        
+        // Add multiple waiters
+        let mut handles = Vec::new();
+        for _ in 0..3 {
+            let queue_clone = queue.clone();
+            let count_clone = woken_count.clone();
+            let handle = compio::runtime::spawn(async move {
+                queue_clone.add_waiter_if(|| false).await;
+                count_clone.fetch_add(1, Ordering::SeqCst);
+            });
+            handles.push(handle);
+        }
+        
+        compio::time::sleep(Duration::from_millis(10)).await;
+        
+        // Wake exactly one
+        queue.wake_one();
+        
+        // Wait a bit for the wake to take effect
+        compio::time::sleep(Duration::from_millis(10)).await;
+        
+        // Should have woken exactly 1
+        assert_eq!(woken_count.load(Ordering::SeqCst), 1);
+        
+        // Wake the rest
+        queue.wake_all();
+        
+        for handle in handles {
+            handle.await.unwrap();
+        }
+        
+        assert_eq!(woken_count.load(Ordering::SeqCst), 3);
+    })
+    .await
+    .expect("test timed out");
+}
+
+/// Test that condition=true skips wait (fast path)
+///
+/// When the condition is true, no waiter should be added.
+///
+/// **Requirement:** add_waiter_if(|| true) completes immediately,
+/// no waiter registered.
+#[compio::test]
+async fn test_condition_true_skips_wait() {
+    compio::time::timeout(Duration::from_secs(5), async {
+        let queue = WaiterQueue::new();
+        
+        // Condition is true - should complete immediately
+        queue.add_waiter_if(|| true).await;
+        
+        // If we got here, the future completed (which is correct for true condition)
+        // waiter_count should be 0 since no waiter was registered
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(queue.waiter_count(), 0);
+    })
+    .await
+    .expect("test timed out");
+}
+
+/// Test that condition=false adds waiter (slow path)
+///
+/// When the condition is false, a waiter should be added.
+///
+/// **Requirement:** add_waiter_if(|| false) registers a waiter for later waking.
+#[compio::test]
+async fn test_condition_false_adds_waiter() {
+    compio::time::timeout(Duration::from_secs(5), async {
+        let queue = Arc::new(WaiterQueue::new());
+        
+        // Spawn a task that will wait
+        let queue_clone = queue.clone();
+        let handle = compio::runtime::spawn(async move {
+            queue_clone.add_waiter_if(|| false).await;
+        });
+        
+        // Give time for registration
+        compio::time::sleep(Duration::from_millis(10)).await;
+        
+        // Should have a waiter registered
+        #[cfg(not(target_os = "linux"))]
+        assert!(queue.waiter_count() > 0);
+        
+        // Wake it
+        queue.wake_one();
+        
+        // Should complete
+        handle.await.unwrap();
+    })
+    .await
+    .expect("test timed out");
+}
+
+/// Test rapid registration and deregistration cycles
+///
+/// Verifies that the queue can handle rapid churn without
+/// issues or resource leaks.
+#[compio::test]
+async fn test_rapid_registration_cycles() {
+    compio::time::timeout(Duration::from_secs(5), async {
+        let queue = Arc::new(WaiterQueue::new());
+        
+        for _ in 0..100 {
+            let queue_clone = queue.clone();
+            let fut = compio::runtime::spawn(async move {
+                queue_clone.add_waiter_if(|| false).await;
+            });
+            
+            // Drop immediately to test deregistration
+            drop(fut);
+            
+            // Small delay
+            compio::time::sleep(Duration::from_micros(100)).await;
+        }
+        
+        // Should not leak resources
+        queue.wake_all();
+    })
+    .await
+    .expect("test timed out");
+}
+
+/// Test with very high concurrency (1000+ waiters)
+///
+/// This test verifies that the implementation can handle
+/// realistic high-concurrency scenarios without issues.
+#[compio::test]
+async fn test_high_concurrency_stress() {
+    compio::time::timeout(Duration::from_secs(10), async {
+        let queue = Arc::new(WaiterQueue::new());
+        let woken_count = Arc::new(AtomicUsize::new(0));
+        
+        const NUM_WAITERS: usize = 1000;
+        let mut handles = Vec::new();
+        
+        // Spawn many waiters
+        for _ in 0..NUM_WAITERS {
+            let queue_clone = queue.clone();
+            let count_clone = woken_count.clone();
+            let handle = compio::runtime::spawn(async move {
+                queue_clone.add_waiter_if(|| false).await;
+                count_clone.fetch_add(1, Ordering::SeqCst);
+            });
+            handles.push(handle);
+        }
+        
+        compio::time::sleep(Duration::from_millis(50)).await;
+        
+        // Wake all at once
+        queue.wake_all();
+        
+        for handle in handles {
+            handle.await.unwrap();
+        }
+        
+        assert_eq!(woken_count.load(Ordering::SeqCst), NUM_WAITERS);
+    })
+    .await
+    .expect("test timed out");
+}
+
+/// Test that all platforms behave consistently
+///
+/// This test verifies that the WaiterQueueTrait contract is
+/// satisfied across all platforms.
+#[compio::test]
+async fn test_platform_behavior_consistency() {
+    compio::time::timeout(Duration::from_secs(5), async {
+        let queue = Arc::new(WaiterQueue::new());
+        
+        // Test 1: wake_one() wakes exactly one
+        let woken_count = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        
+        for _ in 0..3 {
+            let queue_clone = queue.clone();
+            let count_clone = woken_count.clone();
+            let handle = compio::runtime::spawn(async move {
+                queue_clone.add_waiter_if(|| false).await;
+                count_clone.fetch_add(1, Ordering::SeqCst);
+            });
+            handles.push(handle);
+        }
+        
+        compio::time::sleep(Duration::from_millis(10)).await;
+        
+        // Wake exactly one
+        queue.wake_one();
+        
+        // Wait a bit
+        compio::time::sleep(Duration::from_millis(10)).await;
+        
+        // Should have woken exactly 1
+        assert_eq!(woken_count.load(Ordering::SeqCst), 1);
+        
+        // Wake the rest
+        queue.wake_all();
+        
+        for handle in handles {
+            handle.await.unwrap();
+        }
+        
+        assert_eq!(woken_count.load(Ordering::SeqCst), 3);
+    })
+    .await
+    .expect("test timed out");
+}
+
+/// Test wake_all with no waiters doesn't panic
+///
+/// Calling wake_all() with no waiters should be a no-op.
+#[compio::test]
+async fn test_wake_all_no_waiters() {
+    compio::time::timeout(Duration::from_secs(5), async {
+        let queue = WaiterQueue::new();
+        
+        // Should not panic
+        queue.wake_all();
+        
+        // Should still be empty
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(queue.waiter_count(), 0);
+    })
+    .await
+    .expect("test timed out");
+}
+
+/// Test wake_one with no waiters doesn't panic
+///
+/// Calling wake_one() with no waiters should be a no-op.
+#[compio::test]
+async fn test_wake_one_no_waiters() {
+    compio::time::timeout(Duration::from_secs(5), async {
+        let queue = WaiterQueue::new();
+        
+        // Should not panic
+        queue.wake_one();
+        
+        // Should still be empty
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(queue.waiter_count(), 0);
+    })
+    .await
+    .expect("test timed out");
+}
+
+/// Test multiple wake_one calls wake multiple waiters
+///
+/// Verifies that calling wake_one() N times wakes N waiters.
+#[compio::test]
+async fn test_multiple_wake_one_calls() {
+    compio::time::timeout(Duration::from_secs(5), async {
+        let queue = Arc::new(WaiterQueue::new());
+        let woken_count = Arc::new(AtomicUsize::new(0));
+        
+        // Add waiters
+        let mut handles = Vec::new();
+        for _ in 0..5 {
+            let queue_clone = queue.clone();
+            let count_clone = woken_count.clone();
+            let handle = compio::runtime::spawn(async move {
+                queue_clone.add_waiter_if(|| false).await;
+                count_clone.fetch_add(1, Ordering::SeqCst);
+            });
+            handles.push(handle);
+        }
+        
+        compio::time::sleep(Duration::from_millis(10)).await;
+        
+        // Wake exactly 3
+        queue.wake_one();
+        queue.wake_one();
+        queue.wake_one();
+        
+        // Wait for wakes to take effect
+        compio::time::sleep(Duration::from_millis(10)).await;
+        
+        // Should have woken exactly 3
+        assert_eq!(woken_count.load(Ordering::SeqCst), 3);
+        
+        // Wake the remaining 2
+        queue.wake_all();
+        
+        for handle in handles {
+            handle.await.unwrap();
+        }
+        
+        assert_eq!(woken_count.load(Ordering::SeqCst), 5);
+    })
+    .await
+    .expect("test timed out");
+}
