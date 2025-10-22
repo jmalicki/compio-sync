@@ -646,7 +646,7 @@ mod tests {
             // Set up the mock to inject permit release in race window
             let sem_clone = sem.clone();
             let released_clone = released.clone();
-            (&sem.inner.waiters).set_on_add_waiter(move || {
+            sem.inner.waiters.set_on_add_waiter(move || {
                 // This executes IN THE RACE WINDOW
                 // (after try_acquire fails, during waiter registration)
 
@@ -693,7 +693,7 @@ mod tests {
 
             // Set up mock to release MULTIPLE permits during registration
             let sem_clone = sem.clone();
-            (&sem.inner.waiters).set_on_add_waiter(move || {
+            sem.inner.waiters.set_on_add_waiter(move || {
                 // Release 5 permits at once
                 sem_clone.inner.permits.fetch_add(5, Ordering::Release);
             });
@@ -729,7 +729,7 @@ mod tests {
 
             // Set up mock to release permit AND explicitly wake during registration
             let sem_clone = sem.clone();
-            (&sem.inner.waiters).set_on_add_waiter(move || {
+            sem.inner.waiters.set_on_add_waiter(move || {
                 // Release permit
                 sem_clone.inner.permits.fetch_add(1, Ordering::Release);
                 // Explicitly wake (might be redundant with re-check, but should be safe)
@@ -763,7 +763,7 @@ mod tests {
 
             // Set up mock to release permit then immediately steal it back
             let sem_clone = sem.clone();
-            (&sem.inner.waiters).set_on_add_waiter(move || {
+            sem.inner.waiters.set_on_add_waiter(move || {
                 // Release permit
                 sem_clone.inner.permits.fetch_add(1, Ordering::Release);
                 // Immediately steal it back (simulates another thread taking it)

@@ -374,7 +374,7 @@ mod tests {
 
             // Set up mock to notify during registration
             let cv_clone = cv.clone();
-            (&cv.inner.waiters).set_on_add_waiter(move || {
+            cv.inner.waiters.set_on_add_waiter(move || {
                 // Notify during registration (race window)
                 cv_clone.notify_one();
             });
@@ -396,7 +396,7 @@ mod tests {
 
             // Set up mock to notify_all during registration
             let cv_clone = cv.clone();
-            (&cv.inner.waiters).set_on_add_waiter(move || {
+            cv.inner.waiters.set_on_add_waiter(move || {
                 cv_clone.notify_all();
             });
 
@@ -420,7 +420,7 @@ mod tests {
 
             // Set up mock to clear during registration
             let cv_clone = cv.clone();
-            (&cv.inner.waiters).set_on_add_waiter(move || {
+            cv.inner.waiters.set_on_add_waiter(move || {
                 // Clear notification during registration
                 cv_clone.clear();
             });
