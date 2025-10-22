@@ -257,16 +257,16 @@ impl<W: WaiterQueueTrait + Sync> Default for CondvarGeneric<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::waiter_queue::{WaiterQueue as PlatformWaiterQueue, WaiterQueueTrait};
     use std::sync::Arc;
-    use crate::waiter_queue::{WaiterQueueTrait, WaiterQueue as PlatformWaiterQueue};
     use std::sync::Mutex;
-    
+
     /// Mock WaiterQueue for testing race conditions in Condvar
     struct MockWaiterQueue {
         on_add_waiter: Mutex<Option<Box<dyn FnOnce() + Send>>>,
         inner: PlatformWaiterQueue,
     }
-    
+
     impl MockWaiterQueue {
         fn new() -> Self {
             Self {
@@ -274,7 +274,7 @@ mod tests {
                 inner: PlatformWaiterQueue::new(),
             }
         }
-        
+
         fn set_on_add_waiter<F>(&self, f: F)
         where
             F: FnOnce() + Send + 'static,
@@ -282,12 +282,12 @@ mod tests {
             *self.on_add_waiter.lock().unwrap() = Some(Box::new(f));
         }
     }
-    
+
     impl WaiterQueueTrait for MockWaiterQueue {
         fn new() -> Self {
             MockWaiterQueue::new()
         }
-        
+
         fn add_waiter_if<'a, F>(&'a self, condition: F) -> impl std::future::Future<Output = ()>
         where
             F: Fn() -> bool + Send + Sync + 'a,
@@ -298,15 +298,15 @@ mod tests {
             }
             self.inner.add_waiter_if(condition)
         }
-        
+
         fn wake_one(&self) {
             self.inner.wake_one()
         }
-        
+
         fn wake_all(&self) {
             self.inner.wake_all()
         }
-        
+
         fn waiter_count(&self) -> usize {
             self.inner.waiter_count()
         }
@@ -362,103 +362,94 @@ mod tests {
         let cv = Condvar::new();
         assert!(!cv.inner.notified.load(Ordering::Relaxed));
     }
-    
+
     /// Test that notify_one() during registration works correctly
-    /// 
+    ///
     /// Condvar uses proper condition (|| notified.load()), so notification
     /// during registration should be caught by the re-check.
     #[compio::test]
     async fn test_mock_notify_during_registration() {
         compio::time::timeout(std::time::Duration::from_secs(2), async {
             let cv = Arc::new(CondvarGeneric::<MockWaiterQueue>::new());
-            
+
             // Set up mock to notify during registration
             let cv_clone = cv.clone();
             (&cv.inner.waiters).set_on_add_waiter(move || {
                 // Notify during registration (race window)
                 cv_clone.notify_one();
             });
-            
+
             // Should complete immediately (re-check catches notification)
-            compio::time::timeout(
-                std::time::Duration::from_millis(500),
-                cv.wait()
-            )
-            .await
-            .expect("Should not timeout - condition re-check should catch notification");
+            compio::time::timeout(std::time::Duration::from_millis(500), cv.wait())
+                .await
+                .expect("Should not timeout - condition re-check should catch notification");
         })
         .await
         .expect("Test timed out");
     }
-    
+
     /// Test that notify_all() during registration works correctly
     #[compio::test]
     async fn test_mock_notify_all_during_registration() {
         compio::time::timeout(std::time::Duration::from_secs(2), async {
             let cv = Arc::new(CondvarGeneric::<MockWaiterQueue>::new());
-            
+
             // Set up mock to notify_all during registration
             let cv_clone = cv.clone();
             (&cv.inner.waiters).set_on_add_waiter(move || {
                 cv_clone.notify_all();
             });
-            
+
             // Should complete immediately
-            compio::time::timeout(
-                std::time::Duration::from_millis(500),
-                cv.wait()
-            )
-            .await
-            .expect("Should not timeout - notify_all + re-check should work");
+            compio::time::timeout(std::time::Duration::from_millis(500), cv.wait())
+                .await
+                .expect("Should not timeout - notify_all + re-check should work");
         })
         .await
         .expect("Test timed out");
     }
-    
+
     /// Test that clear() during registration doesn't cause issues
     #[compio::test]
     async fn test_mock_clear_during_registration() {
         compio::time::timeout(std::time::Duration::from_secs(2), async {
             let cv = Arc::new(CondvarGeneric::<MockWaiterQueue>::new());
-            
+
             // Pre-notify so condition would be true
             cv.notify_one();
-            
+
             // Set up mock to clear during registration
             let cv_clone = cv.clone();
             (&cv.inner.waiters).set_on_add_waiter(move || {
                 // Clear notification during registration
                 cv_clone.clear();
             });
-            
+
             // Should timeout (notification was cleared before re-check)
-            let result = compio::time::timeout(
-                std::time::Duration::from_millis(200),
-                cv.wait()
-            )
-            .await;
-            
+            let result =
+                compio::time::timeout(std::time::Duration::from_millis(200), cv.wait()).await;
+
             assert!(result.is_err(), "Should timeout - notification was cleared");
         })
         .await
         .expect("Test timed out");
     }
-    
+
     /// Test MockWaiterQueue delegates correctly for normal Condvar operations
     #[compio::test]
     async fn test_mock_condvar_normal_operation() {
         compio::time::timeout(std::time::Duration::from_secs(2), async {
             let cv = Arc::new(CondvarGeneric::<MockWaiterQueue>::new());
-            
+
             // Normal notify before wait (no hook)
             cv.notify_one();
             cv.wait().await;
-            
+
             // Notify all
             cv.notify_all();
             cv.wait().await;
             cv.wait().await;
-            
+
             // Clear works
             cv.clear();
         })

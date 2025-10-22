@@ -252,23 +252,23 @@ async fn test_semaphore_api_methods() {
 async fn test_semaphore_lost_wake_race() {
     compio::time::timeout(TEST_TIMEOUT, async {
         let sem = Arc::new(Semaphore::new(1));
-        
+
         // Hold the permit
         let permit = sem.acquire().await;
-        
+
         // Spawn a task that will try to acquire
         let sem_clone = sem.clone();
         let handle = compio::runtime::spawn(async move {
             sem_clone.acquire().await;
         });
-        
+
         // Yield to let the task start and fail try_acquire()
         compio::time::sleep(Duration::from_millis(1)).await;
-        
+
         // Release permit - this races with add_waiter_if registration
         // The condition re-check should catch this
         drop(permit);
-        
+
         // The task should complete (caught in re-check or woken)
         // This will TIMEOUT if the lost-wake race occurs
         compio::time::timeout(Duration::from_millis(500), handle)
