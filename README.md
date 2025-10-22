@@ -141,11 +141,13 @@ Our CI tests across multiple platforms to ensure compatibility and performance:
 | **Ubuntu 24.04** | Modern Linux (kernel 6.11) | io_uring futex integration |
 | **Ubuntu 22.04** | Older Linux (kernel 5.15) | Generic fallback (parking_lot) |
 | **Windows 2022** | Modern Windows | IOCP event integration (planned) |
+| **macOS 14** | macOS | Generic fallback (parking_lot) |
 
 ### Platform-Specific Features
 
 - **Linux**: Uses io_uring futex operations for unified event loop
 - **Windows**: Will use IOCP events for unified event loop (Phase 3)
+- **macOS**: Uses generic fallback (kqueue could be added in future)
 - **Fallback**: Generic implementation using parking_lot + AtomicWaker
 
 ### Testing Limitations
