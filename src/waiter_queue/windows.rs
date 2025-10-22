@@ -274,7 +274,7 @@ impl WaitOnAddressQueue {
     /// thread-local in compio's runtime.
     pub fn add_waiter_if<F>(&self, condition: F) -> AddWaiterFuture<F>
     where
-        F: Fn() -> bool + Send + Sync,
+        F: Fn() -> bool + Send + Sync + Unpin,
     {
         AddWaiterFuture {
             queue: self,
@@ -330,7 +330,7 @@ pub struct AddWaiterFuture<'a, F> {
 #[cfg(windows)]
 impl<'a, F> std::future::Future for AddWaiterFuture<'a, F>
 where
-    F: Fn() -> bool + Send + Sync,
+    F: Fn() -> bool + Send + Sync + Unpin,
 {
     type Output = ();
 
@@ -341,7 +341,7 @@ where
         let this = self.get_mut();
 
         // Fast path: check condition first
-        if this.condition() {
+        if (this.condition)() {
             return std::task::Poll::Ready(());
         }
 
