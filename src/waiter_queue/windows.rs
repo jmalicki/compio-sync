@@ -221,7 +221,7 @@ impl EventHandle {
                 std::ptr::null(),     // no name
             );
 
-            if handle == 0 || handle == INVALID_HANDLE_VALUE {
+            if handle == std::ptr::null_mut() || handle == INVALID_HANDLE_VALUE {
                 return Err(io::Error::last_os_error());
             }
 
@@ -238,7 +238,7 @@ impl EventHandle {
     fn signal(&self) {
         use windows_sys::Win32::System::Threading::SetEvent;
         unsafe {
-            SetEvent(self.handle as isize);
+            SetEvent(self.handle as *mut std::ffi::c_void);
         }
     }
 }
@@ -248,7 +248,7 @@ impl Drop for EventHandle {
     fn drop(&mut self) {
         use windows_sys::Win32::Foundation::CloseHandle;
         unsafe {
-            CloseHandle(self.handle as isize);
+            CloseHandle(self.handle as *mut std::ffi::c_void);
         }
     }
 }
