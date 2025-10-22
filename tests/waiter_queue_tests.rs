@@ -147,7 +147,7 @@ async fn test_wake_all_wakes_all_waiters() {
 /// race conditions between event signaling and waiter registration if not
 /// properly synchronized.
 // DISABLED: This test reveals a bug in the current implementation
-// 
+//
 // BUG DISCOVERED: The test fails because wake_one() is waking more waiters than expected.
 // This indicates a race condition or synchronization issue in the WaiterQueue
 // implementation, likely related to:
@@ -159,10 +159,11 @@ async fn test_wake_all_wakes_all_waiters() {
 // only wakes exactly one waiter, then re-enable this test.
 //
 // #[compio::test]
+#[allow(dead_code)]
 async fn test_concurrent_registration_and_wake() {
     // DISABLED: This test reveals a bug in the current WaiterQueue implementation
     // where wake_one() is waking more waiters than expected.
-    // 
+    //
     // The test expects exactly 2 tasks to complete after 2 wake_one() calls,
     // but the current implementation is waking more than 2 tasks.
     //
@@ -171,7 +172,7 @@ async fn test_concurrent_registration_and_wake() {
     //
     // TODO: Fix the WaiterQueue implementation to ensure wake_one() only
     // wakes exactly one waiter, then uncomment and re-enable this test.
-    
+
     /*
     compio::time::timeout(Duration::from_secs(5), async {
         let queue = Arc::new(WaiterQueue::new());
