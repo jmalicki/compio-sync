@@ -268,31 +268,18 @@ impl WaitOnAddressQueue {
 
     /// Add a waiter if condition is false
     ///
-    /// For IOCP, returns the submit() future directly!
-    /// The caller will await this future, and compio will wake them when the event is signaled.
+    /// For IOCP, returns a future that properly handles drop to deregister waiters.
     ///
     /// **Note**: The returned future is `!Send` because IOCP operations are
     /// thread-local in compio's runtime.
-    pub fn add_waiter_if<F>(&self, condition: F) -> impl std::future::Future<Output = ()> + use<F>
+    pub fn add_waiter_if<F>(&self, condition: F) -> AddWaiterFuture<F>
     where
         F: Fn() -> bool + Send + Sync,
     {
-        let event = Arc::clone(&self.event);
-
-        async move {
-            // Fast path: check condition first
-            if condition() {
-                return;
-            }
-
-            // Submit IOCP event wait - this future completes when event is signaled
-            let op = EventWaitOp::new(event.clone());
-
-            // Just await the submit - compio handles the waker!
-            // When the event is signaled (via wake_one/wake_all), this completes
-            let _ = compio::runtime::submit(op).await;
-
-            // Note: No waiter count tracking - IOCP manages waiters internally
+        AddWaiterFuture {
+            queue: self,
+            condition,
+            registered: false,
         }
     }
 
@@ -329,6 +316,59 @@ impl WaitOnAddressQueue {
 impl Default for WaitOnAddressQueue {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Future returned by add_waiter_if for Windows IOCP
+#[cfg(windows)]
+pub struct AddWaiterFuture<'a, F> {
+    queue: &'a WaitOnAddressQueue,
+    condition: F,
+    registered: bool,
+}
+
+#[cfg(windows)]
+impl<'a, F> std::future::Future for AddWaiterFuture<'a, F>
+where
+    F: Fn() -> bool + Send + Sync,
+{
+    type Output = ();
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let this = self.get_mut();
+
+        // Fast path: check condition first
+        if this.condition() {
+            return std::task::Poll::Ready(());
+        }
+
+        // If not registered yet, register and submit IOCP operation
+        if !this.registered {
+            this.registered = true;
+            this.queue.waiter_count.fetch_add(1, Ordering::Relaxed);
+
+            let event = Arc::clone(&this.queue.event);
+            let op = EventWaitOp::new(event);
+
+            // Submit IOCP event wait - this future completes when event is signaled
+            let _ = compio::runtime::submit(op);
+        }
+
+        // Always return Pending - IOCP will wake us when the event is signaled
+        std::task::Poll::Pending
+    }
+}
+
+#[cfg(windows)]
+impl<'a, F> Drop for AddWaiterFuture<'a, F> {
+    fn drop(&mut self) {
+        // Deregister if we were registered
+        if self.registered {
+            self.queue.waiter_count.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 }
 
