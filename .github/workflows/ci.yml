@@ -138,6 +138,13 @@ jobs:
         with:
           toolchain: ${{ matrix.rust }}
       
+      # Workaround for sccache/cache corruption on ubuntu-22.04 stable
+      - name: Clean and disable sccache for ubuntu-22.04 stable
+        if: matrix.os == 'ubuntu-22.04' && matrix.rust == 'stable'
+        run: |
+          cargo clean
+          echo "RUSTC_WRAPPER=" >> $GITHUB_ENV
+      
       - name: Check kernel version (verify io_uring futex support)
         run: |
           echo "Kernel version:"
