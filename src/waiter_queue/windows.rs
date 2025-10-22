@@ -333,7 +333,6 @@ impl Default for WaitOnAddressQueue {
     }
 }
 
-
 /// Event wait operation for IOCP
 ///
 /// Waits on a Windows event handle via IOCP (OpType::Event).
