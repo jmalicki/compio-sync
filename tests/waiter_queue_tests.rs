@@ -8,14 +8,13 @@
 //! These tests define the behavioral contract that ALL WaiterQueue
 //! implementations must satisfy.
 
-// Test helpers are now used in actual tests
-
-use compio_sync::{WaiterQueue, WaiterQueueTrait};
+use compio_sync::WaiterQueue;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Wake, Waker};
 
 /// Custom waker for testing
+#[allow(dead_code)]
 struct TestWaker {
     woken: Arc<AtomicBool>,
 }
@@ -27,7 +26,8 @@ impl Wake for TestWaker {
 }
 
 impl TestWaker {
-    fn new() -> (Waker, Arc<AtomicBool>) {
+    #[allow(dead_code)]
+    fn create() -> (Waker, Arc<AtomicBool>) {
         let woken = Arc::new(AtomicBool::new(false));
         let waker = Arc::new(TestWaker {
             woken: Arc::clone(&woken),
@@ -38,6 +38,7 @@ impl TestWaker {
 }
 
 /// Counting waker for stress tests
+#[allow(dead_code)]
 struct CountingWaker {
     count: Arc<AtomicUsize>,
 }
@@ -49,7 +50,8 @@ impl Wake for CountingWaker {
 }
 
 impl CountingWaker {
-    fn new() -> (Waker, Arc<AtomicUsize>) {
+    #[allow(dead_code)]
+    fn create() -> (Waker, Arc<AtomicUsize>) {
         let count = Arc::new(AtomicUsize::new(0));
         let waker = Arc::new(CountingWaker {
             count: Arc::clone(&count),
@@ -86,7 +88,7 @@ async fn test_wake_all_wakes_all_waiters() {
     for _ in 0..num_waiters {
         let queue_clone = Arc::clone(&queue);
         let count_clone = Arc::clone(&woken_count);
-        
+
         // Spawn async task that waits
         let handle = compio::runtime::spawn(async move {
             // This will wait until woken
@@ -126,7 +128,7 @@ async fn test_wake_all_wakes_all_waiters() {
 #[ignore = "WaiterQueue not yet exposed for testing - will be enabled in implementation PR"]
 fn test_wake_one_wakes_single_waiter() {
     // Expected behavior:
-    // 1. Create WaiterQueue  
+    // 1. Create WaiterQueue
     // 2. Add N waiters with condition=false
     // 3. Call wake_one()
     // 4. Verify exactly 1 waker was woken (not 0, not >1)
