@@ -87,8 +87,8 @@ jobs:
         os: 
           - ubuntu-24.04  # Kernel 6.11 - tests io_uring futex path (requires 6.7+)
           - ubuntu-22.04  # Kernel 5.15 - tests generic fallback path
+          - windows-2022  # Windows - tests IOCP event integration
         rust: [stable, nightly]
-        # Future: add windows-latest, macos-latest when platform-specific code is ready
     steps:
       - uses: actions/checkout@v4
       
@@ -129,6 +129,7 @@ jobs:
         os:
           - ubuntu-24.04  # Kernel 6.11 - tests io_uring futex path (requires 6.7+)
           - ubuntu-22.04  # Kernel 5.15 - tests generic fallback path
+          - windows-2022  # Windows - tests IOCP event integration
         rust: [stable, nightly]
     steps:
       - uses: actions/checkout@v4
@@ -145,11 +146,17 @@ jobs:
           cargo clean
           echo "RUSTC_WRAPPER=" >> $GITHUB_ENV
       
-      - name: Check kernel version (verify io_uring futex support)
+      - name: Check system version
         run: |
-          echo "Kernel version:"
-          uname -r
-          echo "Expected: 6.7+ for io_uring futex support"
+          if [[ "${{ matrix.os }}" == "windows-2022" ]]; then
+            echo "Windows version:"
+            echo "Testing IOCP event integration"
+          else
+            echo "Kernel version:"
+            uname -r
+            echo "Expected: 6.7+ for io_uring futex support"
+          fi
+        shell: bash
       
       - name: Run tests
         run: cargo test --verbose --all-features

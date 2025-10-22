@@ -132,6 +132,31 @@ We are actively researching and planning to eliminate mutexes from our synchroni
 
 See the [research docs](./docs/) for detailed analysis and trade-offs.
 
+## CI Matrix
+
+Our CI tests across multiple platforms to ensure compatibility and performance:
+
+| Platform | Purpose | Implementation |
+|----------|--------|----------------|
+| **Ubuntu 24.04** | Modern Linux (kernel 6.11) | io_uring futex integration |
+| **Ubuntu 22.04** | Older Linux (kernel 5.15) | Generic fallback (parking_lot) |
+| **Windows 2022** | Modern Windows | IOCP event integration (planned) |
+
+### Platform-Specific Features
+
+- **Linux**: Uses io_uring futex operations for unified event loop
+- **Windows**: Will use IOCP events for unified event loop (Phase 3)
+- **Fallback**: Generic implementation using parking_lot + AtomicWaker
+
+### Testing Limitations
+
+**Windows 7 Support**: While compio-sync is designed to work on older Windows versions (including Windows 7), we cannot test this in CI due to GitHub Actions limitations. GitHub Actions only provides:
+- `windows-latest` (Windows Server 2022)
+- `windows-2019` (Windows Server 2019) 
+- `windows-2016` (Windows Server 2016)
+
+**Legacy Windows Testing**: For Windows 7 and other legacy versions, the library will use the generic fallback implementation (parking_lot + AtomicWaker). This provides good performance while maintaining compatibility with older systems.
+
 ## Contributing
 
 Contributions are welcome! Please see:
