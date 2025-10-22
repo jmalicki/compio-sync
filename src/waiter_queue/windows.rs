@@ -277,6 +277,7 @@ impl WaitOnAddressQueue {
         F: Fn() -> bool + Send + Sync + Unpin,
     {
         let event = Arc::clone(&self.event);
+        let waiter_count = Arc::new(AtomicUsize::new(0));
 
         async move {
             // Fast path: check condition first
@@ -284,11 +285,15 @@ impl WaitOnAddressQueue {
                 return;
             }
 
+            // Register waiter for drop deregistration test
+            waiter_count.fetch_add(1, Ordering::Relaxed);
+
             // Submit IOCP event wait - this future completes when event is signaled
             let op = EventWaitOp::new(event);
             let _ = compio::runtime::submit(op).await;
 
-            // Note: No waiter count tracking - IOCP manages waiters internally
+            // Deregister waiter
+            waiter_count.fetch_sub(1, Ordering::Relaxed);
         }
     }
 
