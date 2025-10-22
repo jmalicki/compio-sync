@@ -11,14 +11,10 @@
 //! Fallback: If requirements not met, falls back to generic implementation
 
 use super::generic::WaiterQueue as GenericWaiterQueue;
+use compio_driver::{OpCode, OpEntry};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
-
-#[cfg(target_os = "linux")]
-use compio_driver::{OpCode, OpEntry};
-
-#[cfg(target_os = "linux")]
-use std::pin::Pin;
 
 /// Global cached result of futex support detection
 /// Uses lock-free atomic state machine for thread-safe lazy initialization
@@ -307,12 +303,6 @@ impl IoUringWaiterQueue {
         // Increment futex value (this signals change to waiters)
         self.futex.fetch_add(1, Ordering::Release);
 
-        // Decrement waiter count atomically with saturation
-        // Use fetch_update to prevent underflow from concurrent decrements
-        let _ = self
-            .waiter_count
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| c.checked_sub(1));
-
         // Submit futex wake operation to io_uring
         let op = FutexWakeOp::new(Arc::clone(&self.futex), 1);
         submit_futex_wake(op);
@@ -325,9 +315,6 @@ impl IoUringWaiterQueue {
     pub fn wake_all(&self) {
         // Increment futex value
         self.futex.fetch_add(1, Ordering::Release);
-
-        // Reset waiter count
-        self.waiter_count.store(0, Ordering::Relaxed);
 
         // Submit futex wake operation to wake all waiters
         // Use u32::MAX to wake all possible waiters
