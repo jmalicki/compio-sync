@@ -52,7 +52,6 @@ impl WaiterQueue {
         }
     }
 
-
     /// Add a waiter if condition is false
     pub fn add_waiter_if<'a, F>(
         &'a self,
@@ -266,7 +265,6 @@ impl WaitOnAddressQueue {
             }
         }
     }
-
 
     /// Add a waiter if condition is false
     ///
