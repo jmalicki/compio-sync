@@ -115,11 +115,44 @@ impl WaiterQueue {
     where
         F: Fn() -> bool + Send + Sync + 'a,
     {
-        // Use a struct to track if we've registered across polls
+        // Track where we registered for proper cleanup on drop
+        enum RegistrationState {
+            None,     // Not yet registered
+            Single,   // Registered in single slot
+            Multi,    // Registered in multi queue
+        }
+
+        // Use a struct to track registration state across polls
         struct AddWaiterFuture<'a, F> {
             queue: &'a WaiterQueue,
             condition: F,
-            registered: bool,
+            state: RegistrationState,
+        }
+
+        impl<'a, F> Drop for AddWaiterFuture<'a, F> {
+            fn drop(&mut self) {
+                // Deregister if we're still pending
+                match self.state {
+                    RegistrationState::Single => {
+                        // Try to clean up single slot
+                        // If we successfully take it, reset to Empty
+                        if self.queue.single.take().is_some() {
+                            self.queue.store_mode(Mode::Empty, Ordering::Release);
+                        }
+                    }
+                    RegistrationState::Multi => {
+                        // Can't efficiently remove from VecDeque without knowing our position
+                        // The waker will be a no-op if called (future already dropped)
+                        // This is acceptable - spurious wake is safe, just slightly inefficient
+                        // 
+                        // Note: We could track position in VecDeque but that adds significant
+                        // complexity. The parking_lot Mutex is fast enough that this is okay.
+                    }
+                    RegistrationState::None => {
+                        // Not registered, nothing to clean up
+                    }
+                }
+            }
         }
 
         impl<'a, F> std::future::Future for AddWaiterFuture<'a, F>
@@ -138,8 +171,9 @@ impl WaiterQueue {
                 let this = unsafe { self.as_mut().get_unchecked_mut() };
 
                 // If already registered, just wait for wake
-                if this.registered {
+                if !matches!(this.state, RegistrationState::None) {
                     // We were woken - complete the future
+                    this.state = RegistrationState::None;
                     return Poll::Ready(());
                 }
 
@@ -179,8 +213,8 @@ impl WaiterQueue {
                             return Poll::Ready(());
                         }
 
-                        // Successfully registered, pending
-                        this.registered = true;
+                        // Successfully registered in single slot, pending
+                        this.state = RegistrationState::Single;
                         return Poll::Pending;
                     }
                 }
@@ -215,7 +249,7 @@ impl WaiterQueue {
                 }
 
                 queue.store_mode(Mode::Multi, Ordering::Release);
-                this.registered = true;
+                this.state = RegistrationState::Multi;
                 Poll::Pending
             }
         }
@@ -223,7 +257,7 @@ impl WaiterQueue {
         AddWaiterFuture {
             queue: self,
             condition,
-            registered: false,
+            state: RegistrationState::None,
         }
     }
 
