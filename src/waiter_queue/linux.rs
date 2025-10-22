@@ -63,10 +63,7 @@ impl WaiterQueue {
     }
 
     /// Add a waiter if condition is false
-    pub fn add_waiter_if<F>(
-        &self,
-        condition: F,
-    ) -> impl std::future::Future<Output = ()> + Send + use<F>
+    pub fn add_waiter_if<F>(&self, condition: F) -> impl std::future::Future<Output = ()> + use<'_, F>
     where
         F: Fn() -> bool + Send + Sync,
     {
@@ -74,7 +71,7 @@ impl WaiterQueue {
             WaiterQueue::IoUring(q) => {
                 // Box to make the arms have the same type
                 Box::pin(q.add_waiter_if(condition))
-                    as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+                    as std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>
             }
             WaiterQueue::Generic(q) => Box::pin(q.add_waiter_if(condition)),
         }
@@ -116,10 +113,7 @@ impl super::WaiterQueueTrait for WaiterQueue {
         WaiterQueue::new()
     }
 
-    fn add_waiter_if<F>(
-        &self,
-        condition: F,
-    ) -> impl std::future::Future<Output = ()> + Send + use<'_, F>
+    fn add_waiter_if<F>(&self, condition: F) -> impl std::future::Future<Output = ()>
     where
         F: Fn() -> bool + Send + Sync,
     {
@@ -271,10 +265,10 @@ impl IoUringWaiterQueue {
     ///
     /// For io_uring, returns the submit() future directly!
     /// The caller will await this future, and compio will wake them when the futex changes.
-    pub fn add_waiter_if<F>(
-        &self,
-        condition: F,
-    ) -> impl std::future::Future<Output = ()> + Send + use<F>
+    ///
+    /// **Note**: The returned future is `!Send` because io_uring operations are
+    /// thread-local in compio's runtime.
+    pub fn add_waiter_if<F>(&self, condition: F) -> impl std::future::Future<Output = ()> + use<F>
     where
         F: Fn() -> bool + Send + Sync,
     {

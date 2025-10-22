@@ -55,10 +55,10 @@ pub trait WaiterQueueTrait {
     ///
     /// For io_uring, can return submit() future directly.
     /// For generic, returns immediately-ready future.
-    fn add_waiter_if<F>(
-        &self,
-        condition: F,
-    ) -> impl std::future::Future<Output = ()> + Send + use<'_, F, Self>
+    ///
+    /// **Note**: The returned future is `!Send` because io_uring operations are
+    /// thread-local. This is fine for compio's single-threaded runtime model.
+    fn add_waiter_if<F>(&self, condition: F) -> impl std::future::Future<Output = ()>
     where
         F: Fn() -> bool + Send + Sync;
 
