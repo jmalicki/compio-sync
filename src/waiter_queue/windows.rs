@@ -225,8 +225,8 @@ impl EventHandle {
                 return Err(io::Error::last_os_error());
             }
 
-            Ok(Self { 
-                handle: handle as RawHandle 
+            Ok(Self {
+                handle: handle as RawHandle,
             })
         }
     }
