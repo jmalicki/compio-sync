@@ -272,7 +272,7 @@ impl WaitOnAddressQueue {
     ///
     /// **Note**: The returned future is `!Send` because IOCP operations are
     /// thread-local in compio's runtime.
-    pub fn add_waiter_if<F>(&self, condition: F) -> AddWaiterFuture<F>
+    pub fn add_waiter_if<F>(&self, condition: F) -> AddWaiterFuture<'_, F>
     where
         F: Fn() -> bool + Send + Sync + Unpin,
     {
@@ -354,7 +354,7 @@ where
             let op = EventWaitOp::new(event);
 
             // Submit IOCP event wait - this future completes when event is signaled
-            let _ = compio::runtime::submit(op);
+            std::mem::drop(compio::runtime::submit(op));
         }
 
         // Always return Pending - IOCP will wake us when the event is signaled
