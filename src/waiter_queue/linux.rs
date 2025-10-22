@@ -25,6 +25,13 @@ const FUTEX_UNKNOWN: u8 = 0;
 const FUTEX_UNSUPPORTED: u8 = 1;
 const FUTEX_SUPPORTED: u8 = 2;
 
+<<<<<<< Updated upstream
+=======
+// Futex2 flags for proper wake behavior
+const FUTEX_PRIVATE_FLAG: u32 = 0x01;  // Process-private futex
+const FUTEX_32: u32 = 0x02;            // 32-bit futex
+
+>>>>>>> Stashed changes
 /// Linux waiter queue - uses io_uring futex operations when available,
 /// falls back to generic implementation otherwise
 pub enum WaiterQueue {
@@ -237,7 +244,11 @@ fn submit_futex_wake(op: FutexWakeOp) {
                 futex_ptr,                 // uaddr
                 op.count as libc::c_uint,  // nr_wake
                 u64::MAX as libc::c_ulong, // mask (match all bits)
+<<<<<<< Updated upstream
                 0 as libc::c_uint,         // flags (FUTEX2_PRIVATE is default)
+=======
+                (FUTEX_PRIVATE_FLAG | FUTEX_32) as libc::c_uint, // flags
+>>>>>>> Stashed changes
                 0 as libc::c_uint,         // val3 (unused)
             );
         }
@@ -301,16 +312,17 @@ impl IoUringWaiterQueue {
     }
 
     /// Wake one waiting task
-    pub fn wake_one(&self) {
-        // Increment futex value (this signals change to waiters)
-        self.futex.fetch_add(1, Ordering::Release);
+    pub fn wake_one(&self) -> impl std::future::Future<Output = ()> + Send {
+        let futex = Arc::clone(&self.futex);
+        
+        async move {
+            // Increment futex value (this signals change to waiters)
+            futex.fetch_add(1, Ordering::Release);
 
-        // Submit futex wake operation to io_uring
-        let op = FutexWakeOp::new(Arc::clone(&self.futex), 1);
-        submit_futex_wake(op);
-
-        // Note: Wake happens asynchronously through io_uring
-        // The futex wait operations will complete and their futures will wake
+            // Submit futex wake operation to io_uring and await completion
+            let op = FutexWakeOp::new(futex, 1);
+            compio::runtime::submit(op).await;
+        }
     }
 
     /// Wake all waiting tasks
@@ -382,7 +394,11 @@ impl OpCode for FutexWaitOp {
             futex_ptr,
             self.expected as u64, // Expected value
             u64::MAX,             // Mask (match all bits)
+<<<<<<< Updated upstream
             0,                    // futex_flags (futex2 flags, 0 for default)
+=======
+            (FUTEX_PRIVATE_FLAG | FUTEX_32) as u64, // futex_flags
+>>>>>>> Stashed changes
         )
         .build();
 
@@ -425,7 +441,11 @@ impl OpCode for FutexWakeOp {
             futex_ptr,
             self.count as u64, // Number to wake
             u64::MAX,          // Mask (match all bits)
+<<<<<<< Updated upstream
             0,                 // futex_flags
+=======
+            (FUTEX_PRIVATE_FLAG | FUTEX_32) as u64, // futex_flags
+>>>>>>> Stashed changes
         )
         .build();
 

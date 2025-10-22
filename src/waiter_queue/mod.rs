@@ -67,13 +67,13 @@ pub trait WaiterQueueTrait: Sync {
     /// **Ordering**: Wake order is implementation-dependent and NOT guaranteed to be FIFO.
     /// - Generic: FIFO (uses parking_lot queue)
     /// - io_uring: Unspecified (kernel scheduling)
-    fn wake_one(&self);
+    fn wake_one(&self) -> impl std::future::Future<Output = ()> + Send;
 
     /// Wake all waiting tasks
     ///
     /// **Ordering**: Wake order is implementation-dependent and NOT guaranteed to be FIFO.
     /// All waiters will be woken, but in an unspecified order.
-    fn wake_all(&self);
+    fn wake_all(&self) -> impl std::future::Future<Output = ()> + Send;
 
     /// Get the number of waiting tasks (for debugging/stats)
     #[allow(dead_code)]
