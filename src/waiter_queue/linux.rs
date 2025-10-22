@@ -13,7 +13,7 @@
 use super::generic::WaiterQueue as GenericWaiterQueue;
 use compio_driver::{OpCode, OpEntry};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 
 /// Global cached result of futex support detection
