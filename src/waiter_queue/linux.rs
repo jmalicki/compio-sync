@@ -63,18 +63,18 @@ impl WaiterQueue {
     }
 
     /// Add a waiter if condition is false
-    pub fn add_waiter_if<F>(
-        &self,
+    pub fn add_waiter_if<'a, F>(
+        &'a self,
         condition: F,
-    ) -> impl std::future::Future<Output = ()> + use<'_, F>
+    ) -> impl std::future::Future<Output = ()> + use<'a, F>
     where
-        F: Fn() -> bool + Send + Sync,
+        F: Fn() -> bool + Send + Sync + 'a,
     {
         match self {
             WaiterQueue::IoUring(q) => {
                 // Box to make the arms have the same type
                 Box::pin(q.add_waiter_if(condition))
-                    as std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>
+                    as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>>
             }
             WaiterQueue::Generic(q) => Box::pin(q.add_waiter_if(condition)),
         }
