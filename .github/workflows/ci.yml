@@ -150,7 +150,6 @@ jobs:
         run: |
           if [[ "${{ matrix.os }}" == "windows-2022" ]]; then
             echo "Windows version:"
-            ver
             echo "Testing IOCP event integration"
           else
             echo "Kernel version:"
