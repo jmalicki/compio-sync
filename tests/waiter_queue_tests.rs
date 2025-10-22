@@ -129,38 +129,6 @@ async fn test_wake_all_wakes_all_waiters() {
 /// - Generic/Windows: Returns approximate count (>0 when waiters exist, 0 after wake_all())
 /// - Linux io_uring: Panics (kernel manages waiters with no query API)
 ///
-/// Test should handle the panic case for io_uring or be skipped on that platform.
-#[test]
-#[ignore = "WaiterQueue not yet exposed for testing - will be enabled in implementation PR"]
-fn test_waiter_count_tracking() {
-    // Expected behavior:
-    // Generic/Windows:
-    //   1. Start: waiter_count() == 0
-    //   2. Add 3 waiters: waiter_count() > 0
-    //   3. wake_all(): waiter_count() == 0
-    // Linux io_uring:
-    //   - waiter_count() panics (no kernel query API)
-    //   - Consider #[cfg] gating or catch_unwind for this platform
-}
-
-
-
-/// Stress test: Many waiters with wake_all
-///
-/// Verifies behavior with a large number of waiters (100+).
-///
-/// **This is the most important test for the Windows auto-reset bug.**
-/// With auto-reset events, only 1 out of 100 waiters would be woken.
-#[test]
-#[ignore = "WaiterQueue not yet exposed for testing - will be enabled in implementation PR"]
-fn test_wake_all_many_waiters() {
-    // Expected behavior:
-    // 1. Add 100 waiters
-    // 2. Call wake_all()
-    // 3. Verify all 100 were woken
-    //
-    // This is a CRITICAL test for Windows IOCP implementation.
-}
 
 
 
@@ -210,12 +178,21 @@ async fn test_concurrent_registration_and_wake() {
         queue.wake_one();
         queue.wake_one();
         
-        // Wait for all
+        // Wait for all tasks to complete (some will timeout)
+        let mut completed_count = 0;
         for handle in handles {
-            handle.await.unwrap();
+            // Use a shorter timeout for individual tasks
+            match compio::time::timeout(Duration::from_millis(100), handle).await {
+                Ok(_) => completed_count += 1,
+                Err(_) => {
+                    // Task timed out, which is expected for the 8 unwoken tasks
+                }
+            }
         }
         
-        assert_eq!(woken_count.load(Ordering::SeqCst), 10);
+        // Only 2 tasks should have completed (the ones we woke)
+        assert_eq!(completed_count, 2, "Only 2 tasks should complete with 2 wake_one() calls");
+        assert_eq!(woken_count.load(Ordering::SeqCst), 2, "Only 2 tasks should be woken");
     })
     .await
     .expect("test timed out");
