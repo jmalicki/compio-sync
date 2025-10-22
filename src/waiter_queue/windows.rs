@@ -277,7 +277,6 @@ impl WaitOnAddressQueue {
         F: Fn() -> bool + Send + Sync + Unpin,
     {
         let event = Arc::clone(&self.event);
-        let waiter_count = Arc::clone(&self.waiter_count);
 
         async move {
             // Fast path: check condition first
@@ -285,37 +284,26 @@ impl WaitOnAddressQueue {
                 return;
             }
 
-            // Register waiter
-            waiter_count.fetch_add(1, Ordering::Relaxed);
-
             // Submit IOCP event wait - this future completes when event is signaled
             let op = EventWaitOp::new(event);
             let _ = compio::runtime::submit(op).await;
 
-            // Deregister waiter
-            waiter_count.fetch_sub(1, Ordering::Relaxed);
+            // Note: No waiter count tracking - IOCP manages waiters internally
         }
     }
 
     /// Wake one waiting task
     pub fn wake_one(&self) {
-        // Decrement waiter count
-        let count = self.waiter_count.load(Ordering::Relaxed);
-        if count > 0 {
-            self.waiter_count.fetch_sub(1, Ordering::Relaxed);
-        }
-
         // Signal event - triggers IOCP completion
+        // Note: IOCP will wake one waiter, similar to futex wake
         #[cfg(windows)]
         self.event.signal();
     }
 
     /// Wake all waiting tasks
     pub fn wake_all(&self) {
-        // Reset waiter count
-        self.waiter_count.store(0, Ordering::Relaxed);
-
         // Signal event - triggers IOCP completion for all waiters
+        // Note: IOCP will wake all waiters, similar to futex wake all
         #[cfg(windows)]
         self.event.signal();
     }
