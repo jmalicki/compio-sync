@@ -767,7 +767,7 @@ mod tests {
                 // Release permit
                 sem_clone.inner.permits.fetch_add(1, Ordering::Release);
                 // Immediately steal it back (simulates another thread taking it)
-                sem_clone.inner.permits.fetch_sub(1, Ordering::Acquire);
+                sem_clone.inner.permits.fetch_sub(1, Ordering::AcqRel);
             });
 
             // Try to acquire - should timeout since permit is stolen
