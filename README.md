@@ -159,6 +159,29 @@ Our CI tests across multiple platforms to ensure compatibility and performance:
 
 **Legacy Windows Testing**: For Windows 7 and other legacy versions, the library will use the generic fallback implementation (parking_lot + AtomicWaker). This provides good performance while maintaining compatibility with older systems.
 
+## Development
+
+### Pre-commit Hook
+
+This repository includes a pre-commit hook that automatically formats and lints code before commits. To install it:
+
+```bash
+# Install the pre-commit hook
+./scripts/install-pre-commit.sh
+```
+
+The hook will:
+- Format all Rust code with `cargo fmt`
+- Run clippy lints with strict settings
+- Run all tests to ensure nothing is broken
+
+### Code Quality
+
+All code must pass:
+- `cargo fmt --all` (formatting)
+- `cargo clippy --all-targets --all-features -- -D warnings` (linting)
+- `cargo test --all-targets` (testing)
+
 ## Contributing
 
 Contributions are welcome! Please see:
