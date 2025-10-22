@@ -52,16 +52,6 @@ impl WaiterQueue {
         }
     }
 
-    /// Get event handle for IOCP implementation (Windows only)
-    ///
-    /// This is used by platform-specific Future implementations.
-    #[cfg(windows)]
-    pub(crate) fn get_event_handle(&self) -> Option<Arc<EventHandle>> {
-        match self {
-            WaiterQueue::WaitOnAddress(q) => Some(q.get_event_handle()),
-            WaiterQueue::Generic(_) => None,
-        }
-    }
 
     /// Add a waiter if condition is false
     pub fn add_waiter_if<'a, F>(
@@ -203,7 +193,7 @@ pub struct WaitOnAddressQueue {
 }
 
 #[cfg(windows)]
-struct EventHandle {
+pub struct EventHandle {
     handle: RawHandle,
 }
 
@@ -221,7 +211,7 @@ impl EventHandle {
                 std::ptr::null(),     // no name
             );
 
-            if handle == std::ptr::null_mut() || handle == INVALID_HANDLE_VALUE {
+            if handle.is_null() || handle == INVALID_HANDLE_VALUE {
                 return Err(io::Error::last_os_error());
             }
 
@@ -238,7 +228,7 @@ impl EventHandle {
     fn signal(&self) {
         use windows_sys::Win32::System::Threading::SetEvent;
         unsafe {
-            SetEvent(self.handle as *mut std::ffi::c_void);
+            SetEvent(self.handle);
         }
     }
 }
@@ -248,7 +238,7 @@ impl Drop for EventHandle {
     fn drop(&mut self) {
         use windows_sys::Win32::Foundation::CloseHandle;
         unsafe {
-            CloseHandle(self.handle as *mut std::ffi::c_void);
+            CloseHandle(self.handle);
         }
     }
 }
@@ -277,13 +267,6 @@ impl WaitOnAddressQueue {
         }
     }
 
-    /// Get the event handle for IOCP operations
-    ///
-    /// This is used by platform-specific Future implementations.
-    #[cfg(windows)]
-    pub(crate) fn get_event_handle(&self) -> Arc<EventHandle> {
-        Arc::clone(&self.event)
-    }
 
     /// Add a waiter if condition is false
     ///
@@ -341,6 +324,13 @@ impl WaitOnAddressQueue {
     /// Get waiter count (approximate)
     pub fn waiter_count(&self) -> usize {
         self.waiter_count.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(windows)]
+impl Default for WaitOnAddressQueue {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
