@@ -45,25 +45,22 @@ pub trait WaiterQueueTrait {
     /// Create a new waiter queue
     fn new() -> Self;
 
-    /// Poll to add a waiter to the queue if condition is false (atomic check-and-add)
+    /// Add a waiter to the queue if condition is false (atomic check-and-add)
     ///
-    /// This is a poll-based method to allow platform-specific implementations (like io_uring)
-    /// to submit async operations. Generic implementation returns Poll::Ready immediately.
+    /// Completes when either:
+    /// - Condition was already true (fast path, no registration)
+    /// - Waiter was registered and subsequently woken
     ///
-    /// Idempotency: Implementations must handle repeated polls safely (no duplicate enqueues
-    /// for the same task) and should update the stored waker on re-poll.
+    /// After awaiting, caller should re-check the actual condition.
     ///
-    /// Returns:
-    /// - `Poll::Ready(true)`: condition was true (no waiter enqueued)
-    /// - `Poll::Ready(false)`: condition was false (waiter enqueued; caller must return Pending)
-    /// - `Poll::Pending`: the operation itself is pending (e.g., io_uring submission)
-    fn poll_add_waiter_if<F>(
+    /// For io_uring, can return submit() future directly.
+    /// For generic, returns immediately-ready future.
+    fn add_waiter_if<F>(
         &self,
         condition: F,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<bool>
+    ) -> impl std::future::Future<Output = ()> + Send + use<'_, F, Self>
     where
-        F: Fn() -> bool;
+        F: Fn() -> bool + Send + Sync;
 
     /// Wake one waiting task
     fn wake_one(&self);
@@ -90,36 +87,33 @@ mod tests {
     async fn test_add_waiter_if_condition_true() {
         let queue = WaiterQueue::new();
 
-        // Condition is true - should NOT add waiter
-        let added = std::future::poll_fn(|cx| queue.poll_add_waiter_if(|| true, cx)).await;
-        assert!(added, "Should return true when condition is true");
+        // Condition is true - should complete immediately
+        queue.add_waiter_if(|| true).await;
+        // If we got here, the future completed (which is correct for true condition)
     }
 
     #[compio::test]
     async fn test_add_waiter_if_condition_false() {
-        let queue = WaiterQueue::new();
+        let queue = std::sync::Arc::new(WaiterQueue::new());
+        let queue_clone = queue.clone();
 
-        // Condition is false - should add waiter
-        let added = std::future::poll_fn(|cx| queue.poll_add_waiter_if(|| false, cx)).await;
-        assert!(!added, "Should return false when condition is false");
-    }
+        // Condition is false - will register and pend
+        // We need to wake it to complete
+        let handle = compio::runtime::spawn(async move {
+            queue_clone.add_waiter_if(|| false).await;
+        });
 
-    #[compio::test]
-    async fn test_add_waiter_idempotent_on_repoll() {
-        let queue = WaiterQueue::new();
+        // Give it time to register
+        compio::time::sleep(std::time::Duration::from_millis(10)).await;
 
-        // Register waiter
-        let added1 = std::future::poll_fn(|cx| queue.poll_add_waiter_if(|| false, cx)).await;
-        assert!(!added1, "First poll should register waiter");
+        // Wake it
+        queue.wake_one();
 
-        // Note: In real usage, we wouldn't re-poll after Ready(false).
-        // But this tests that implementation handles it safely if it happens.
-        // Since AtomicWaker.register() updates in-place, count should still be 1.
-        assert_eq!(
-            queue.waiter_count(),
-            1,
-            "Should have exactly 1 waiter after registration"
-        );
+        // Should complete now
+        compio::time::timeout(std::time::Duration::from_millis(100), handle)
+            .await
+            .expect("Should complete after wake")
+            .expect("Task should succeed");
     }
 
     #[test]

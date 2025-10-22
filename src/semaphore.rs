@@ -27,10 +27,7 @@
 //! ```
 
 use crate::waiter_queue::{WaiterQueue, WaiterQueueTrait};
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::task::{Context, Poll};
 
 /// A compio-compatible async semaphore for bounding concurrency
 ///
@@ -149,7 +146,18 @@ impl<W: WaiterQueueTrait> SemaphoreGeneric<W> {
     /// # }
     /// ```
     pub async fn acquire(&self) -> SemaphorePermit<'_, W> {
-        AcquireFuture { semaphore: self }.await
+        loop {
+            // Fast path: try to acquire immediately
+            if let Some(permit) = self.try_acquire() {
+                return permit;
+            }
+
+            // No permits - wait for notification
+            // Note: condition is || false because permits are checked separately
+            self.inner.waiters.add_waiter_if(|| false).await;
+
+            // After wake, loop back to try_acquire (permits may have been released)
+        }
     }
 
     /// Try to acquire a permit without waiting
@@ -366,79 +374,6 @@ pub struct SemaphorePermit<'a, W: WaiterQueueTrait> {
 impl<'a, W: WaiterQueueTrait> Drop for SemaphorePermit<'a, W> {
     fn drop(&mut self) {
         self.semaphore.release();
-    }
-}
-
-/// Future that resolves when a semaphore permit is acquired
-///
-/// This future is returned by `Semaphore::acquire()`. It will:
-/// 1. Try the fast path (atomic decrement if permits available)
-/// 2. If no permits, register the task's waker and return `Poll::Pending`
-/// 3. When a permit is released, the waker is called and the future retries
-struct AcquireFuture<'a, W: WaiterQueueTrait> {
-    /// The semaphore from which to acquire a permit
-    semaphore: &'a SemaphoreGeneric<W>,
-}
-
-impl<'a, W: WaiterQueueTrait> Future for AcquireFuture<'a, W> {
-    type Output = SemaphorePermit<'a, W>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // RACE-FREE PATTERN: Try-register-retry using WaiterQueue
-        //
-        // Unlike Condvar, we can't use atomic check-and-add because:
-        // - Permits are atomic (separate from waiter queue)
-        // - We want lock-free fast path for try_acquire()
-        //
-        // Solution: Try, then add to queue, then try again
-        // The second try catches permits released during queue registration
-        //
-        // Why this is safe for async code:
-        // - WaiterQueue mutex held for nanoseconds (just memory ops, no I/O)
-        // - No `.await` inside critical section
-        // - See `waiter_queue.rs` for detailed safety explanation
-
-        // First try (fast path, lock-free atomic)
-        if let Some(permit) = self.semaphore.try_acquire() {
-            return Poll::Ready(permit);
-        }
-
-        // No permits - add ourselves to waiter queue (unconditionally)
-        // We can't use add_waiter_if here because permits are checked separately
-        //
-        // Defensive loop: While the condition is hard-coded to `|| false`,
-        // the loop structure makes the code robust to future changes and
-        // handles the theoretical Poll::Ready(true) case gracefully.
-        loop {
-            // Retry fast path before attempting to register again
-            if let Some(permit) = self.semaphore.try_acquire() {
-                return Poll::Ready(permit);
-            }
-
-            match self
-                .semaphore
-                .inner
-                .waiters
-                .poll_add_waiter_if(|| false, cx)
-            {
-                Poll::Ready(true) => {
-                    // Condition shouldn't be true with `|| false`, but be robust.
-                    // Loop to retry acquire immediately.
-                    continue;
-                }
-                Poll::Ready(false) => {
-                    // Registered; try again before yielding.
-                    if let Some(permit) = self.semaphore.try_acquire() {
-                        return Poll::Ready(permit);
-                    }
-                    return Poll::Pending;
-                }
-                Poll::Pending => {
-                    // Platform impl is pending (e.g., io_uring submission)
-                    return Poll::Pending;
-                }
-            }
-        }
     }
 }
 

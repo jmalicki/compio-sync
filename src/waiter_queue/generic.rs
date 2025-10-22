@@ -107,93 +107,124 @@ impl WaiterQueue {
     /// - Adds waiter only if condition is false
     /// - Re-checks after registration to prevent lost wakeups
     ///
-    /// Returns `Poll::Ready` immediately (never `Poll::Pending`) for the generic implementation.
-    ///
-    /// Contract for callers:
-    /// - If this returns `Poll::Ready(false)`, you MUST return `Poll::Pending` from your poll
-    ///   to keep the current task alive; otherwise the stored `Waker` may target a completed future.
-    ///
-    /// Returns:
-    /// - `Poll::Ready(true)`: condition was true (do not register)
-    /// - `Poll::Ready(false)`: condition was false (waiter registered; caller should return `Pending`)
-    pub fn poll_add_waiter_if<F>(
+    /// Returns a future that completes when condition is true or waiter is woken.
+    pub fn add_waiter_if<F>(
         &self,
         condition: F,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<bool>
+    ) -> impl std::future::Future<Output = ()> + Send + use<'_, F>
     where
-        F: Fn() -> bool,
+        F: Fn() -> bool + Send + Sync,
     {
-        use std::task::Poll;
-        // Try single-waiter fast path first
-        let mode = self.load_mode(Ordering::Acquire);
+        // Use a struct to track if we've registered across polls
+        struct AddWaiterFuture<'a, F> {
+            queue: &'a WaiterQueue,
+            condition: F,
+            registered: bool,
+        }
 
-        if mode == Mode::Empty {
-            // Try to transition EMPTY → SINGLE atomically
-            if self
-                .compare_exchange_mode(
-                    Mode::Empty,
-                    Mode::Single,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_ok()
-            {
-                // Successfully claimed single slot - use lock-free AtomicWaker!
+        impl<'a, F> std::future::Future for AddWaiterFuture<'a, F>
+        where
+            F: Fn() -> bool,
+        {
+            type Output = ();
 
-                // Check before registration
-                if condition() {
-                    self.store_mode(Mode::Empty, Ordering::Release);
-                    return Poll::Ready(true);
+            fn poll(
+                mut self: std::pin::Pin<&mut Self>,
+                cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<()> {
+                use std::task::Poll;
+
+                // SAFETY: We don't move out of self, just access fields
+                let this = unsafe { self.as_mut().get_unchecked_mut() };
+
+                // If already registered, just wait for wake
+                if this.registered {
+                    // We were woken - complete the future
+                    return Poll::Ready(());
                 }
 
-                // Register with AtomicWaker (lock-free atomic operation!)
-                self.single.register(cx.waker());
+                let queue = this.queue;
+                let condition = &this.condition;
+
+                // Try single-waiter fast path first
+                let mode = queue.load_mode(Ordering::Acquire);
+
+                if mode == Mode::Empty {
+                    // Try to transition EMPTY → SINGLE atomically
+                    if queue
+                        .compare_exchange_mode(
+                            Mode::Empty,
+                            Mode::Single,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        // Successfully claimed single slot - use lock-free AtomicWaker!
+
+                        // Check before registration
+                        if condition() {
+                            queue.store_mode(Mode::Empty, Ordering::Release);
+                            return Poll::Ready(());
+                        }
+
+                        // Register with AtomicWaker (lock-free atomic operation!)
+                        queue.single.register(cx.waker());
+
+                        // Re-check after registration to prevent lost wake
+                        if condition() {
+                            // Take the waker back and reset mode
+                            queue.single.take();
+                            queue.store_mode(Mode::Empty, Ordering::Release);
+                            return Poll::Ready(());
+                        }
+
+                        // Successfully registered, pending
+                        this.registered = true;
+                        return Poll::Pending;
+                    }
+                }
+
+                // Multiple waiters or contention → use multi queue (and migrate single)
+                // Check condition before taking locks
+                if condition() {
+                    return Poll::Ready(());
+                }
+
+                let mut waiters = queue.multi.lock();
+
+                // Migrate single-slot waiter if present (atomically take it)
+                if let Some(prev) = queue.single.take() {
+                    waiters.push_back(prev);
+                }
+
+                // Register this waiter
+                waiters.push_back(cx.waker().clone());
 
                 // Re-check after registration to prevent lost wake
                 if condition() {
-                    // Take the waker back and reset mode
-                    self.single.take();
-                    self.store_mode(Mode::Empty, Ordering::Release);
-                    return Poll::Ready(true);
+                    // Remove our own registration
+                    let _ = waiters.pop_back();
+                    // If nothing remains, update mode accordingly
+                    if waiters.is_empty() {
+                        queue.store_mode(Mode::Empty, Ordering::Release);
+                    } else {
+                        queue.store_mode(Mode::Multi, Ordering::Release);
+                    }
+                    return Poll::Ready(());
                 }
 
-                // Successfully registered, pending
-                return Poll::Ready(false);
+                queue.store_mode(Mode::Multi, Ordering::Release);
+                this.registered = true;
+                Poll::Pending
             }
         }
 
-        // Multiple waiters or contention → use multi queue (and migrate single)
-        // Check condition before taking locks
-        if condition() {
-            return Poll::Ready(true);
+        AddWaiterFuture {
+            queue: self,
+            condition,
+            registered: false,
         }
-
-        let mut waiters = self.multi.lock();
-
-        // Migrate single-slot waiter if present (atomically take it)
-        if let Some(prev) = self.single.take() {
-            waiters.push_back(prev);
-        }
-
-        // Register this waiter
-        waiters.push_back(cx.waker().clone());
-
-        // Re-check after registration to prevent lost wake
-        if condition() {
-            // Remove our own registration
-            let _ = waiters.pop_back();
-            // If nothing remains, update mode accordingly
-            if waiters.is_empty() {
-                self.store_mode(Mode::Empty, Ordering::Release);
-            } else {
-                self.store_mode(Mode::Multi, Ordering::Release);
-            }
-            return Poll::Ready(true);
-        }
-
-        self.store_mode(Mode::Multi, Ordering::Release);
-        Poll::Ready(false)
     }
 
     /// Wake one waiting task
@@ -327,15 +358,14 @@ impl WaiterQueueTrait for WaiterQueue {
         WaiterQueue::new()
     }
 
-    fn poll_add_waiter_if<F>(
+    fn add_waiter_if<F>(
         &self,
         condition: F,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<bool>
+    ) -> impl std::future::Future<Output = ()> + Send + use<'_, F>
     where
-        F: Fn() -> bool,
+        F: Fn() -> bool + Send + Sync,
     {
-        WaiterQueue::poll_add_waiter_if(self, condition, cx)
+        WaiterQueue::add_waiter_if(self, condition)
     }
 
     fn wake_one(&self) {
@@ -364,42 +394,57 @@ mod tests {
 
     #[compio::test]
     async fn test_single_waiter() {
-        let queue = WaiterQueue::new();
+        let queue = std::sync::Arc::new(WaiterQueue::new());
+        let queue_clone = queue.clone();
 
-        // Add single waiter
-        let result = std::future::poll_fn(|cx| queue.poll_add_waiter_if(|| false, cx)).await;
-        assert!(!result);
+        // Add single waiter in background
+        let handle = compio::runtime::spawn(async move {
+            queue_clone.add_waiter_if(|| false).await;
+        });
+
+        // Give it time to register
+        compio::time::sleep(std::time::Duration::from_millis(10)).await;
         assert_eq!(queue.waiter_count(), 1);
 
         // Wake it
         queue.wake_one();
+
+        // Should complete
+        compio::time::timeout(std::time::Duration::from_millis(100), handle)
+            .await
+            .expect("Should complete after wake")
+            .expect("Task should succeed");
         assert_eq!(queue.waiter_count(), 0);
     }
 
     #[compio::test]
     async fn test_multiple_waiters() {
-        let queue = WaiterQueue::new();
+        let queue = std::sync::Arc::new(WaiterQueue::new());
 
-        // Add multiple waiters
-        std::future::poll_fn(|cx| queue.poll_add_waiter_if(|| false, cx)).await;
-        std::future::poll_fn(|cx| queue.poll_add_waiter_if(|| false, cx)).await;
-        std::future::poll_fn(|cx| queue.poll_add_waiter_if(|| false, cx)).await;
+        // Add multiple waiters in background
+        let handles: Vec<_> = (0..3)
+            .map(|_| {
+                let q = queue.clone();
+                compio::runtime::spawn(async move { q.add_waiter_if(|| false).await })
+            })
+            .collect();
 
+        // Give them time to register
+        compio::time::sleep(std::time::Duration::from_millis(10)).await;
         let count = queue.waiter_count();
         assert!(count >= 1, "Should have at least 1 waiter, got {}", count);
 
-        // Wake one
-        queue.wake_one();
-
-        // Should have fewer waiters now
-        let count_after_wake_one = queue.waiter_count();
-        assert!(
-            count_after_wake_one < count,
-            "Should have fewer waiters after wake_one"
-        );
-
         // Wake all
         queue.wake_all();
+
+        // All should complete
+        for handle in handles {
+            compio::time::timeout(std::time::Duration::from_millis(100), handle)
+                .await
+                .expect("Should complete after wake")
+                .expect("Task should succeed");
+        }
+
         assert_eq!(
             queue.waiter_count(),
             0,
@@ -411,15 +456,9 @@ mod tests {
     async fn test_condition_check() {
         let queue = WaiterQueue::new();
 
-        // Condition true - should not add
-        let result = std::future::poll_fn(|cx| queue.poll_add_waiter_if(|| true, cx)).await;
-        assert!(result);
+        // Condition true - should complete immediately
+        queue.add_waiter_if(|| true).await;
         assert_eq!(queue.waiter_count(), 0);
-
-        // Condition false - should add
-        let result = std::future::poll_fn(|cx| queue.poll_add_waiter_if(|| false, cx)).await;
-        assert!(!result);
-        assert_eq!(queue.waiter_count(), 1);
     }
 
     #[test]

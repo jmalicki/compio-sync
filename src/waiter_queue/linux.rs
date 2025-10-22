@@ -67,17 +67,20 @@ impl WaiterQueue {
     }
 
     /// Add a waiter if condition is false
-    pub fn poll_add_waiter_if<F>(
+    pub fn add_waiter_if<F>(
         &self,
         condition: F,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<bool>
+    ) -> impl std::future::Future<Output = ()> + Send + use<F>
     where
-        F: Fn() -> bool,
+        F: Fn() -> bool + Send + Sync,
     {
         match self {
-            WaiterQueue::IoUring(q) => q.poll_add_waiter_if(condition, cx),
-            WaiterQueue::Generic(q) => q.poll_add_waiter_if(condition, cx),
+            WaiterQueue::IoUring(q) => {
+                // Box to make the arms have the same type
+                Box::pin(q.add_waiter_if(condition))
+                    as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+            }
+            WaiterQueue::Generic(q) => Box::pin(q.add_waiter_if(condition)),
         }
     }
 
@@ -117,15 +120,14 @@ impl super::WaiterQueueTrait for WaiterQueue {
         WaiterQueue::new()
     }
 
-    fn poll_add_waiter_if<F>(
+    fn add_waiter_if<F>(
         &self,
         condition: F,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<bool>
+    ) -> impl std::future::Future<Output = ()> + Send + use<'_, F>
     where
-        F: Fn() -> bool,
+        F: Fn() -> bool + Send + Sync,
     {
-        WaiterQueue::poll_add_waiter_if(self, condition, cx)
+        WaiterQueue::add_waiter_if(self, condition)
     }
 
     fn wake_one(&self) {
@@ -147,20 +149,6 @@ impl super::WaiterQueueTrait for WaiterQueue {
 /// Result is cached globally using a lock-free atomic state machine.
 /// We only probe once per process.
 fn supports_io_uring_futex() -> bool {
-    // DISABLED: Spawn-based approach doesn't work with stateless polling
-    //
-    // Problem: When we spawn a background task and return Poll::Ready(false),
-    // the caller returns Poll::Pending. When the background task wakes the waker,
-    // the caller polls again, which spawns ANOTHER background task, leading to
-    // infinite spawns.
-    //
-    // Solution requires: Stateful WaiterQueue or stateful high-level primitives
-    // to track pending futex operations across polls.
-    //
-    // For now, always use Generic (AtomicWaker) implementation.
-    false
-
-    /* Full probe implementation (works, but disabled due to stateless polling issue):
     // Check cached result first (fast path - lock-free atomic load)
     match FUTEX_SUPPORT.load(Ordering::Acquire) {
         FUTEX_SUPPORTED => return true,
@@ -185,7 +173,6 @@ fn supports_io_uring_futex() -> bool {
     FUTEX_SUPPORT.store(result, Ordering::Release);
 
     supported
-    */
 }
 
 /// Probe io_uring for futex operation support
@@ -225,10 +212,6 @@ pub struct IoUringWaiterQueue {
     /// Futex word for wait/wake operations
     /// Using AtomicU32 because futex operates on u32
     futex: Arc<AtomicU32>,
-
-    /// Waiter count (approximate, for debugging)
-    /// Wrapped in Arc to allow sharing with spawned tasks
-    waiter_count: Arc<AtomicUsize>,
 }
 
 /// Submit futex wake operation
@@ -274,7 +257,6 @@ impl IoUringWaiterQueue {
     pub fn new() -> Self {
         Self {
             futex: Arc::new(AtomicU32::new(0)),
-            waiter_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -291,29 +273,33 @@ impl IoUringWaiterQueue {
 
     /// Add a waiter if condition is false
     ///
-    /// TODO: Full io_uring implementation blocked by architectural constraint.
-    ///
-    /// The spawn-based approach doesn't work with stateless polling:
-    /// - Spawn background task, return Poll::Ready(false) immediately
-    /// - Background task wakes the waker after futex wait completes
-    /// - Caller polls again → spawns ANOTHER task → infinite spawns
-    ///
-    /// Proper solution requires stateful design (track pending ops across polls).
-    /// For now, this is unreachable code since probe is disabled.
-    #[allow(unused_variables)]
-    pub fn poll_add_waiter_if<F>(
+    /// For io_uring, returns the submit() future directly!
+    /// The caller will await this future, and compio will wake them when the futex changes.
+    pub fn add_waiter_if<F>(
         &self,
         condition: F,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<bool>
+    ) -> impl std::future::Future<Output = ()> + Send + use<F, Self>
     where
-        F: Fn() -> bool,
+        F: Fn() -> bool + Send + Sync,
     {
-        use std::task::Poll;
+        let futex = Arc::clone(&self.futex);
 
-        // Unreachable since probe always returns false
-        // Just check condition as fallback
-        Poll::Ready(condition())
+        async move {
+            // Fast path: check condition first
+            if condition() {
+                return;
+            }
+
+            // Submit futex wait - this future completes when futex value changes
+            let current_value = futex.load(Ordering::Acquire);
+            let op = FutexWaitOp::new(futex.clone(), current_value);
+
+            // Just await the submit - compio handles the waker!
+            // When the futex value changes (via wake_one/wake_all), this completes
+            let _ = compio::runtime::submit(op).await;
+
+            // Note: No waiter count tracking - kernel manages waiters internally
+        }
     }
 
     /// Wake one waiting task
@@ -349,9 +335,15 @@ impl IoUringWaiterQueue {
         submit_futex_wake(op);
     }
 
-    /// Get waiter count (approximate)
+    /// Get waiter count
+    ///
+    /// NOT SUPPORTED for io_uring futex implementation.
+    /// The kernel manages waiters internally; there's no API to query the count.
     pub fn waiter_count(&self) -> usize {
-        self.waiter_count.load(Ordering::Relaxed)
+        panic!(
+            "waiter_count() not supported for io_uring futex implementation - \
+             kernel manages waiters internally with no userspace query API"
+        )
     }
 }
 
