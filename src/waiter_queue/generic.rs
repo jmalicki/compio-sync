@@ -117,9 +117,9 @@ impl WaiterQueue {
     {
         // Track where we registered for proper cleanup on drop
         enum RegistrationState {
-            None,     // Not yet registered
-            Single,   // Registered in single slot
-            Multi,    // Registered in multi queue
+            None,   // Not yet registered
+            Single, // Registered in single slot
+            Multi,  // Registered in multi queue
         }
 
         // Use a struct to track registration state across polls
@@ -144,7 +144,7 @@ impl WaiterQueue {
                         // Can't efficiently remove from VecDeque without knowing our position
                         // The waker will be a no-op if called (future already dropped)
                         // This is acceptable - spurious wake is safe, just slightly inefficient
-                        // 
+                        //
                         // Note: We could track position in VecDeque but that adds significant
                         // complexity. The parking_lot Mutex is fast enough that this is okay.
                     }

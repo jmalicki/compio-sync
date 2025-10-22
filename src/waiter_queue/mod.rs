@@ -138,23 +138,23 @@ mod tests {
     }
 
     /// Test that dropping a pending future properly deregisters the waker
-    /// 
+    ///
     /// This prevents:
     /// 1. Memory leaks (waker stays in queue)
     /// 2. Spurious wakes (dead future's waker called)
     #[compio::test]
     async fn test_future_drop_deregisters_waiter() {
-        use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
-        
+        use std::sync::Arc;
+
         compio::time::timeout(std::time::Duration::from_secs(5), async {
             let queue = Arc::new(WaiterQueue::new());
             let was_woken = Arc::new(AtomicBool::new(false));
-            
+
             // Verify queue starts empty
             #[cfg(not(target_os = "linux"))]
             assert_eq!(queue.waiter_count(), 0);
-            
+
             // Start a task that will wait, then drop the handle (cancelling it)
             let queue_clone = queue.clone();
             let woken_clone = was_woken.clone();
@@ -162,20 +162,20 @@ mod tests {
                 queue_clone.add_waiter_if(|| false).await;
                 woken_clone.store(true, Ordering::Release);
             });
-            
+
             // Give it time to register
             compio::time::sleep(std::time::Duration::from_millis(10)).await;
-            
+
             // Verify waiter registered
             #[cfg(not(target_os = "linux"))]
             assert_eq!(queue.waiter_count(), 1, "Waiter should be registered");
-            
+
             // Drop the task handle (cancels the future)
             drop(handle);
-            
+
             // Give time for drop to process
             compio::time::sleep(std::time::Duration::from_millis(10)).await;
-            
+
             // After drop, waiter should be deregistered
             // This will FAIL without proper Drop implementation
             #[cfg(not(target_os = "linux"))]
@@ -184,9 +184,12 @@ mod tests {
                 0,
                 "Waiter should be deregistered after drop"
             );
-            
+
             // Verify the task never completed (was cancelled)
-            assert!(!was_woken.load(Ordering::Acquire), "Cancelled task should not have completed");
+            assert!(
+                !was_woken.load(Ordering::Acquire),
+                "Cancelled task should not have completed"
+            );
         })
         .await
         .expect("Test timed out");
