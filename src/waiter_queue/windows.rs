@@ -10,15 +10,12 @@
 
 use super::generic::WaiterQueue as GenericWaiterQueue;
 use std::io;
-use std::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::task::Waker;
 
 #[cfg(windows)]
 use std::pin::Pin;
 
-#[cfg(windows)]
-use std::future::Future;
 
 #[cfg(windows)]
 use std::os::windows::io::RawHandle;
@@ -65,13 +62,17 @@ impl WaiterQueue {
     }
 
     /// Add a waiter if condition is false
-    pub fn add_waiter_if<F>(&self, condition: F, waker: Waker) -> bool
+    pub fn add_waiter_if<'a, F>(&'a self, condition: F) -> impl std::future::Future<Output = ()> + use<'a, F>
     where
-        F: Fn() -> bool,
+        F: Fn() -> bool + Send + Sync + 'a,
     {
         match self {
-            WaiterQueue::WaitOnAddress(q) => q.add_waiter_if(condition, waker),
-            WaiterQueue::Generic(q) => q.add_waiter_if(condition, waker),
+            WaiterQueue::WaitOnAddress(q) => {
+                // Box to make the arms have the same type
+                Box::pin(q.add_waiter_if(condition))
+                    as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>>
+            }
+            WaiterQueue::Generic(q) => Box::pin(q.add_waiter_if(condition)),
         }
     }
 
@@ -111,11 +112,11 @@ impl super::WaiterQueueTrait for WaiterQueue {
         WaiterQueue::new()
     }
 
-    fn add_waiter_if<F>(&self, condition: F, waker: Waker) -> bool
+    fn add_waiter_if<'a, F>(&'a self, condition: F) -> impl std::future::Future<Output = ()>
     where
-        F: Fn() -> bool,
+        F: Fn() -> bool + Send + Sync + 'a,
     {
-        WaiterQueue::add_waiter_if(self, condition, waker)
+        WaiterQueue::add_waiter_if(self, condition)
     }
 
     fn wake_one(&self) {
@@ -205,7 +206,7 @@ struct EventHandle {
 impl EventHandle {
     fn new() -> io::Result<Self> {
         use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
-        use windows_sys::Win32::System::Threading::{CreateEventW, EVENT_ALL_ACCESS};
+        use windows_sys::Win32::System::Threading::CreateEventW;
 
         unsafe {
             let handle = CreateEventW(
@@ -215,7 +216,7 @@ impl EventHandle {
                 std::ptr::null(),     // no name
             );
 
-            if handle == 0 || handle == INVALID_HANDLE_VALUE as isize {
+            if handle == 0 || handle == INVALID_HANDLE_VALUE {
                 return Err(io::Error::last_os_error());
             }
 
@@ -230,7 +231,7 @@ impl EventHandle {
     fn signal(&self) {
         use windows_sys::Win32::System::Threading::SetEvent;
         unsafe {
-            SetEvent(self.handle);
+            SetEvent(self.handle as isize);
         }
     }
 }
@@ -240,7 +241,7 @@ impl Drop for EventHandle {
     fn drop(&mut self) {
         use windows_sys::Win32::Foundation::CloseHandle;
         unsafe {
-            CloseHandle(self.handle);
+            CloseHandle(self.handle as isize);
         }
     }
 }
@@ -279,23 +280,32 @@ impl WaitOnAddressQueue {
 
     /// Add a waiter if condition is false
     ///
-    /// For IOCP event implementation, this is a simplified check.
-    /// The actual IOCP wait happens in the Future's poll() method.
-    pub fn add_waiter_if<F>(&self, condition: F, _waker: Waker) -> bool
+    /// For IOCP, returns the submit() future directly!
+    /// The caller will await this future, and compio will wake them when the event is signaled.
+    ///
+    /// **Note**: The returned future is `!Send` because IOCP operations are
+    /// thread-local in compio's runtime.
+    pub fn add_waiter_if<F>(&self, condition: F) -> impl std::future::Future<Output = ()> + use<F>
     where
-        F: FnOnce() -> bool,
+        F: Fn() -> bool + Send + Sync,
     {
-        // FAST PATH: Check condition first (pure userspace)
-        if condition() {
-            return true;
+        let event = Arc::clone(&self.event);
+
+        async move {
+            // Fast path: check condition first
+            if condition() {
+                return;
+            }
+
+            // Submit IOCP event wait - this future completes when event is signaled
+            let op = EventWaitOp::new(event.clone());
+
+            // Just await the submit - compio handles the waker!
+            // When the event is signaled (via wake_one/wake_all), this completes
+            let _ = compio::runtime::submit(op).await;
+
+            // Note: No waiter count tracking - IOCP manages waiters internally
         }
-
-        // For IOCP implementation, we don't wait here
-        // The Future's poll() method will submit EventWaitOp to IOCP
-        // Just track that we have a waiter
-        self.waiter_count.fetch_add(1, Ordering::Relaxed);
-
-        false // Pending - Future will handle IOCP event wait
     }
 
     /// Wake one waiting task
@@ -355,7 +365,7 @@ impl compio_driver::OpCode for EventWaitOp {
     /// For Event operations, this is called in the IOCP thread
     unsafe fn operate(
         self: Pin<&mut Self>,
-        _optr: *mut compio_driver::sys::OVERLAPPED,
+        _optr: *mut std::ffi::c_void,
     ) -> std::task::Poll<io::Result<usize>> {
         // Event was signaled - return Ready
         // The actual waiting is handled by IOCP
