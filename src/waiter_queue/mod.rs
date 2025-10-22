@@ -155,40 +155,39 @@ mod tests {
             #[cfg(not(target_os = "linux"))]
             assert_eq!(queue.waiter_count(), 0);
 
-            // Start a task that will wait, then drop the handle (cancelling it)
-            let queue_clone = queue.clone();
-            let woken_clone = was_woken.clone();
-            let handle = compio::runtime::spawn(async move {
-                queue_clone.add_waiter_if(|| false).await;
-                woken_clone.store(true, Ordering::Release);
-            });
-
-            // Give it time to register
-            compio::time::sleep(std::time::Duration::from_millis(10)).await;
-
-            // Verify waiter registered
-            #[cfg(not(target_os = "linux"))]
-            assert_eq!(queue.waiter_count(), 1, "Waiter should be registered");
-
-            // Drop the task handle (cancels the future)
-            drop(handle);
-
-            // Give time for drop to process
-            compio::time::sleep(std::time::Duration::from_millis(10)).await;
-
+            // Create a dummy waker for polling
+            let waker = std::task::Waker::noop();
+            let mut cx = std::task::Context::from_waker(&waker);
+            
+            // Create and poll future, then drop it
+            {
+                let queue_clone = queue.clone();
+                let mut fut = Box::pin(queue_clone.add_waiter_if(|| false));
+                
+                // Poll once to register
+                use std::future::Future;
+                match fut.as_mut().poll(&mut cx) {
+                    std::task::Poll::Pending => {
+                        // Good - registered
+                        #[cfg(not(target_os = "linux"))]
+                        assert_eq!(queue.waiter_count(), 1, "Waiter should be registered");
+                    }
+                    std::task::Poll::Ready(()) => {
+                        panic!("Future should not complete with || false");
+                    }
+                }
+                
+                // Drop the future (goes out of scope)
+                // Drop impl should deregister
+            }
+            
             // After drop, waiter should be deregistered
-            // This will FAIL without proper Drop implementation
+            // This verifies the Drop implementation works
             #[cfg(not(target_os = "linux"))]
             assert_eq!(
                 queue.waiter_count(),
                 0,
                 "Waiter should be deregistered after drop"
-            );
-
-            // Verify the task never completed (was cancelled)
-            assert!(
-                !was_woken.load(Ordering::Acquire),
-                "Cancelled task should not have completed"
             );
         })
         .await
