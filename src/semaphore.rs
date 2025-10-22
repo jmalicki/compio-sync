@@ -153,11 +153,16 @@ impl<W: WaiterQueueTrait> SemaphoreGeneric<W> {
                 return permit;
             }
 
-            // No permits - wait for notification
-            // Note: condition is || false because permits are checked separately
-            self.inner.waiters.add_waiter_if(|| false).await;
+            // No permits - register waiter and wait for release
+            // CRITICAL: Check permit availability during registration to prevent lost-wake race
+            // If permits become available after try_acquire() fails but before registration
+            // completes, the condition re-check will catch it and return immediately.
+            self.inner
+                .waiters
+                .add_waiter_if(|| self.available_permits() > 0)
+                .await;
 
-            // After wake, loop back to try_acquire (permits may have been released)
+            // After wake (or immediate return), loop back to try_acquire
         }
     }
 
@@ -381,7 +386,67 @@ impl<'a, W: WaiterQueueTrait> Drop for SemaphorePermit<'a, W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::waiter_queue::{WaiterQueue as PlatformWaiterQueue, WaiterQueueTrait};
+    use std::sync::atomic::Ordering as AtomicOrdering;
     use std::sync::Arc;
+    use std::sync::Mutex;
+
+    /// Mock WaiterQueue that allows injecting operations during registration
+    /// Used to deterministically test race conditions
+    struct MockWaiterQueue {
+        /// Called when add_waiter_if is invoked (before checking condition)
+        /// Allows test to inject operations in the race window
+        on_add_waiter: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+        /// Actual queue for functional behavior (uses platform default)
+        inner: PlatformWaiterQueue,
+    }
+
+    impl MockWaiterQueue {
+        fn new() -> Self {
+            Self {
+                on_add_waiter: Mutex::new(None),
+                inner: PlatformWaiterQueue::new(),
+            }
+        }
+
+        fn set_on_add_waiter<F>(&self, f: F)
+        where
+            F: FnOnce() + Send + 'static,
+        {
+            *self.on_add_waiter.lock().unwrap() = Some(Box::new(f));
+        }
+    }
+
+    impl WaiterQueueTrait for MockWaiterQueue {
+        fn new() -> Self {
+            MockWaiterQueue::new()
+        }
+
+        fn add_waiter_if<'a, F>(&'a self, condition: F) -> impl std::future::Future<Output = ()>
+        where
+            F: Fn() -> bool + Send + Sync + 'a,
+        {
+            // Call hook if set - this simulates operations happening during registration
+            if let Some(hook) = self.on_add_waiter.lock().unwrap().take() {
+                hook();
+            }
+
+            // Then delegate to real implementation
+            self.inner.add_waiter_if(condition)
+        }
+
+        fn wake_one(&self) {
+            self.inner.wake_one()
+        }
+
+        fn wake_all(&self) {
+            self.inner.wake_all()
+        }
+
+        fn waiter_count(&self) -> usize {
+            self.inner.waiter_count()
+        }
+    }
 
     #[test]
     fn test_semaphore_new() {
@@ -557,5 +622,209 @@ mod tests {
     #[should_panic(expected = "Semaphore must have at least one permit")]
     fn test_semaphore_zero_permits_panics() {
         let _sem = Semaphore::new(0);
+    }
+
+    /// Deterministic test for lost-wake race using MockWaiterQueue
+    ///
+    /// This test uses a mock to inject a permit release DURING the
+    /// add_waiter_if() call, precisely in the race window.
+    ///
+    /// With || false condition: Task will deadlock (waits forever with permit available)
+    /// With || permits > 0 condition: Task completes (re-check catches the permit)
+    #[compio::test]
+    async fn test_lost_wake_race_deterministic() {
+        use std::sync::atomic::AtomicBool;
+
+        compio::time::timeout(std::time::Duration::from_secs(2), async {
+            // Create semaphore with MockWaiterQueue (1 permit)
+            let sem = Arc::new(SemaphoreGeneric::<MockWaiterQueue>::new(1));
+            let released = Arc::new(AtomicBool::new(false));
+
+            // Take the permit (permits = 0)
+            let _permit = sem.acquire().await;
+
+            // Set up the mock to inject permit release in race window
+            let sem_clone = sem.clone();
+            let released_clone = released.clone();
+            sem.inner.waiters.set_on_add_waiter(move || {
+                // This executes IN THE RACE WINDOW
+                // (after try_acquire fails, during waiter registration)
+
+                // Simulate another thread releasing a permit
+                sem_clone.inner.permits.fetch_add(1, Ordering::Release);
+                released_clone.store(true, AtomicOrdering::Release);
+            });
+
+            // Try to acquire while permits = 0
+            // The hook will release the permit DURING add_waiter_if registration
+            // With || false: This will TIMEOUT (deadlock - doesn't see the released permit)
+            // With || permits > 0: This completes (re-check catches permit)
+            let acquire_result =
+                compio::time::timeout(std::time::Duration::from_millis(500), sem.acquire()).await;
+
+            // Verify hook ran (permit was added during registration)
+            assert!(
+                released.load(AtomicOrdering::Acquire),
+                "Hook should have run"
+            );
+
+            // Verify acquisition succeeded (no deadlock)
+            assert!(
+                acquire_result.is_ok(),
+                "LOST-WAKE RACE: Task deadlocked despite permit being available! \
+                 The condition || false doesn't check permit availability during registration."
+            );
+        })
+        .await
+        .expect("Test timed out");
+    }
+
+    /// Test that acquire() takes exactly one permit when multiple are available
+    ///
+    /// This verifies that even if multiple permits become available during
+    /// registration, acquire() only takes one permit (not all of them).
+    #[compio::test]
+    async fn test_mock_multiple_permits_released() {
+        compio::time::timeout(std::time::Duration::from_secs(2), async {
+            let sem = Arc::new(SemaphoreGeneric::<MockWaiterQueue>::new(1));
+
+            // Take the permit (permits = 0)
+            let _permit = sem.acquire().await;
+
+            // Set up mock to release MULTIPLE permits during registration
+            let sem_clone = sem.clone();
+            sem.inner.waiters.set_on_add_waiter(move || {
+                // Release 5 permits at once
+                sem_clone.inner.permits.fetch_add(5, Ordering::Release);
+            });
+
+            // Acquire should take exactly 1 permit, leaving 4
+            let _acquired =
+                compio::time::timeout(std::time::Duration::from_millis(500), sem.acquire())
+                    .await
+                    .expect("Should not timeout");
+
+            // Verify only 1 permit was taken (4 remain)
+            assert_eq!(
+                sem.available_permits(),
+                4,
+                "Should have taken exactly 1 permit"
+            );
+        })
+        .await
+        .expect("Test timed out");
+    }
+
+    /// Test explicit wake_one() during registration is safe
+    ///
+    /// This verifies that calling wake_one() during add_waiter_if registration
+    /// doesn't cause issues (no double-wake, no lost permits).
+    #[compio::test]
+    async fn test_mock_wake_during_registration() {
+        compio::time::timeout(std::time::Duration::from_secs(2), async {
+            let sem = Arc::new(SemaphoreGeneric::<MockWaiterQueue>::new(1));
+
+            // Take the permit (permits = 0)
+            let _permit = sem.acquire().await;
+
+            // Set up mock to release permit AND explicitly wake during registration
+            let sem_clone = sem.clone();
+            sem.inner.waiters.set_on_add_waiter(move || {
+                // Release permit
+                sem_clone.inner.permits.fetch_add(1, Ordering::Release);
+                // Explicitly wake (might be redundant with re-check, but should be safe)
+                sem_clone.inner.waiters.wake_one();
+            });
+
+            // Should complete without issues
+            let _acquired =
+                compio::time::timeout(std::time::Duration::from_millis(500), sem.acquire())
+                    .await
+                    .expect("Should not timeout - wake + re-check should work");
+
+            // Verify permit was consumed
+            assert_eq!(sem.available_permits(), 0, "Permit should be consumed");
+        })
+        .await
+        .expect("Test timed out");
+    }
+
+    /// Test permit stolen by another thread during registration
+    ///
+    /// This verifies retry logic: if a permit appears but is stolen before
+    /// we can acquire it, the task correctly stays pending.
+    #[compio::test]
+    async fn test_mock_permit_stolen() {
+        compio::time::timeout(std::time::Duration::from_secs(2), async {
+            let sem = Arc::new(SemaphoreGeneric::<MockWaiterQueue>::new(1));
+
+            // Take the permit (permits = 0)
+            let _permit = sem.acquire().await;
+
+            // Set up mock to release permit then immediately steal it back
+            let sem_clone = sem.clone();
+            sem.inner.waiters.set_on_add_waiter(move || {
+                // Release permit
+                sem_clone.inner.permits.fetch_add(1, Ordering::Release);
+                // Immediately steal it back (simulates another thread taking it)
+                sem_clone.inner.permits.fetch_sub(1, Ordering::AcqRel);
+            });
+
+            // Try to acquire - should timeout since permit is stolen
+            let acquire_result =
+                compio::time::timeout(std::time::Duration::from_millis(200), sem.acquire()).await;
+
+            // Should timeout (permit was stolen, we stay pending)
+            assert!(
+                acquire_result.is_err(),
+                "Should timeout - permit was stolen, task should stay pending"
+            );
+
+            // Now release a permit for real to unblock
+            drop(_permit);
+
+            // Should be able to acquire now
+            let _acquired =
+                compio::time::timeout(std::time::Duration::from_millis(500), sem.acquire())
+                    .await
+                    .expect("Should acquire after real release");
+        })
+        .await
+        .expect("Test timed out");
+    }
+
+    /// Sanity check that MockWaiterQueue works correctly for normal operations
+    ///
+    /// This verifies the mock properly delegates to the real implementation
+    /// when no hook is set.
+    #[compio::test]
+    async fn test_mock_normal_operation() {
+        compio::time::timeout(std::time::Duration::from_secs(2), async {
+            let sem = Arc::new(SemaphoreGeneric::<MockWaiterQueue>::new(3));
+
+            // Normal acquire/release without any hooks
+            let permit1 = sem.acquire().await;
+            assert_eq!(sem.available_permits(), 2);
+
+            let permit2 = sem.acquire().await;
+            assert_eq!(sem.available_permits(), 1);
+
+            drop(permit1);
+            assert_eq!(sem.available_permits(), 2);
+
+            let permit3 = sem.acquire().await;
+            assert_eq!(sem.available_permits(), 1);
+
+            drop(permit2);
+            drop(permit3);
+            assert_eq!(sem.available_permits(), 3);
+
+            // Verify try_acquire works
+            let permit = sem.try_acquire();
+            assert!(permit.is_some());
+            assert_eq!(sem.available_permits(), 2);
+        })
+        .await
+        .expect("Test timed out");
     }
 }
