@@ -19,6 +19,9 @@ use std::pin::Pin;
 #[cfg(windows)]
 use std::os::windows::io::RawHandle;
 
+#[cfg(windows)]
+use windows_sys::Win32::System::IO::OVERLAPPED;
+
 /// Global cached result of WaitOnAddress support detection
 /// 0 = not checked yet, 1 = not supported, 2 = supported
 static WAITONADDRESS_SUPPORT: AtomicU8 = AtomicU8::new(0);
@@ -369,7 +372,7 @@ impl compio_driver::OpCode for EventWaitOp {
     /// For Event operations, this is called in the IOCP thread
     unsafe fn operate(
         self: Pin<&mut Self>,
-        _optr: *mut windows_sys::Win32::System::IO::OVERLAPPED,
+        _optr: *mut OVERLAPPED,
     ) -> std::task::Poll<io::Result<usize>> {
         // Event was signaled - return Ready
         // The actual waiting is handled by IOCP
