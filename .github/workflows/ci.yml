@@ -97,10 +97,12 @@ jobs:
         with:
           toolchain: ${{ matrix.rust }}
       
-      # Workaround for sccache metadata corruption on ubuntu-22.04 stable
-      - name: Disable sccache for ubuntu-22.04 stable
+      # Workaround for sccache/cache corruption on ubuntu-22.04 stable
+      - name: Clean and disable sccache for ubuntu-22.04 stable
         if: matrix.os == 'ubuntu-22.04' && matrix.rust == 'stable'
-        run: echo "RUSTC_WRAPPER=" >> $GITHUB_ENV
+        run: |
+          cargo clean
+          echo "RUSTC_WRAPPER=" >> $GITHUB_ENV
       
       - name: Build library
         run: cargo build --verbose --all-features
