@@ -415,7 +415,7 @@ impl OpCode for FutexWakeOp {
         let futex_ptr = Arc::as_ptr(&self.futex) as *const u32;
 
         // Create futex wake operation
-        // Parameters: futex address, count, mask (0 = any), futex_flags (0 = none)
+        // Parameters: futex address, count, mask (u64::MAX = match all bits), futex_flags
         let entry = opcode::FutexWake::new(
             futex_ptr,
             self.count as u64, // Number to wake
