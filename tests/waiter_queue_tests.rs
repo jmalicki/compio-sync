@@ -51,6 +51,17 @@ impl Wake for CountingWaker {
     }
 }
 
+impl CountingWaker {
+    fn new() -> (Waker, Arc<AtomicUsize>) {
+        let count = Arc::new(AtomicUsize::new(0));
+        let waker = Arc::new(CountingWaker {
+            count: Arc::clone(&count),
+        })
+        .into();
+        (waker, count)
+    }
+}
+
 // NOTE: These tests are currently disabled because WaiterQueue is not
 // publicly exposed. They will be enabled once we add #[cfg(test)] visibility
 // or create a test-only API.
@@ -100,15 +111,22 @@ fn test_wake_one_wakes_single_waiter() {
 ///
 /// Verifies that waiter_count() accurately reflects registered waiters.
 ///
-/// **Note:** waiter_count() is approximate and platform-dependent,
-/// but should be > 0 when waiters exist and 0 after wake_all().
+/// **Platform-specific behavior:**
+/// - Generic/Windows: Returns approximate count (>0 when waiters exist, 0 after wake_all())
+/// - Linux io_uring: Panics (kernel manages waiters with no query API)
+///
+/// Test should handle the panic case for io_uring or be skipped on that platform.
 #[test]
 #[ignore = "WaiterQueue not yet exposed for testing - will be enabled in implementation PR"]
 fn test_waiter_count_tracking() {
     // Expected behavior:
-    // 1. Start: waiter_count() == 0
-    // 2. Add 3 waiters: waiter_count() > 0
-    // 3. wake_all(): waiter_count() == 0
+    // Generic/Windows:
+    //   1. Start: waiter_count() == 0
+    //   2. Add 3 waiters: waiter_count() > 0
+    //   3. wake_all(): waiter_count() == 0
+    // Linux io_uring:
+    //   - waiter_count() panics (no kernel query API)
+    //   - Consider #[cfg] gating or catch_unwind for this platform
 }
 
 /// Test that condition=true skips wait (fast path)
