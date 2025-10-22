@@ -207,7 +207,7 @@ struct EventHandle {
 #[cfg(windows)]
 impl EventHandle {
     fn new() -> io::Result<Self> {
-        use windows_sys::Win32::Foundation::CreateEventW;
+        use windows_sys::Win32::System::Threading::CreateEventW;
         use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
 
         unsafe {
@@ -367,7 +367,7 @@ impl compio_driver::OpCode for EventWaitOp {
     /// For Event operations, this is called in the IOCP thread
     unsafe fn operate(
         self: Pin<&mut Self>,
-        _optr: *mut std::ffi::c_void,
+        _optr: *mut windows_sys::Win32::System::IO::OVERLAPPED,
     ) -> std::task::Poll<io::Result<usize>> {
         // Event was signaled - return Ready
         // The actual waiting is handled by IOCP
