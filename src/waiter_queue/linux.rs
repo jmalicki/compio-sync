@@ -13,7 +13,6 @@
 use super::generic::WaiterQueue as GenericWaiterQueue;
 use std::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::task::Waker;
 
 #[cfg(target_os = "linux")]
 use compio_driver::{OpCode, OpEntry};
@@ -68,13 +67,17 @@ impl WaiterQueue {
     }
 
     /// Add a waiter if condition is false
-    pub fn add_waiter_if<F>(&self, condition: F, waker: Waker) -> bool
+    pub fn add_waiter_if<'a, F>(&'a self, condition: F) -> impl std::future::Future<Output = ()> + use<'a, F>
     where
-        F: Fn() -> bool,
+        F: Fn() -> bool + Send + Sync + 'a,
     {
         match self {
-            WaiterQueue::IoUring(q) => q.add_waiter_if(condition, waker),
-            WaiterQueue::Generic(q) => q.add_waiter_if(condition, waker),
+            WaiterQueue::IoUring(q) => {
+                // Box to make the arms have the same type
+                Box::pin(q.add_waiter_if(condition))
+                    as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>>
+            }
+            WaiterQueue::Generic(q) => Box::pin(q.add_waiter_if(condition)),
         }
     }
 
@@ -114,11 +117,11 @@ impl super::WaiterQueueTrait for WaiterQueue {
         WaiterQueue::new()
     }
 
-    fn add_waiter_if<F>(&self, condition: F, waker: Waker) -> bool
+    fn add_waiter_if<'a, F>(&'a self, condition: F) -> impl std::future::Future<Output = ()>
     where
-        F: Fn() -> bool,
+        F: Fn() -> bool + Send + Sync + 'a,
     {
-        WaiterQueue::add_waiter_if(self, condition, waker)
+        WaiterQueue::add_waiter_if(self, condition)
     }
 
     fn wake_one(&self) {
@@ -268,31 +271,33 @@ impl IoUringWaiterQueue {
 
     /// Add a waiter if condition is false
     ///
-    /// For io_uring implementation, this is a simplified check.
-    /// The actual futex submission happens in the Future's poll() method.
-    pub fn add_waiter_if<F>(&self, condition: F, _waker: Waker) -> bool
+    /// For io_uring, returns the submit() future directly!
+    /// The caller will await this future, and compio will wake them when the futex changes.
+    ///
+    /// **Note**: The returned future is `!Send` because io_uring operations are
+    /// thread-local in compio's runtime.
+    pub fn add_waiter_if<F>(&self, condition: F) -> impl std::future::Future<Output = ()> + use<F>
     where
-        F: Fn() -> bool,
+        F: Fn() -> bool + Send + Sync,
     {
-        // FAST PATH: Check condition first (pure userspace)
-        if condition() {
-            return true;
+        let futex = Arc::clone(&self.futex);
+
+        async move {
+            // Fast path: check condition first
+            if condition() {
+                return;
+            }
+
+            // Submit futex wait - this future completes when futex value changes
+            let current_value = futex.load(Ordering::Acquire);
+            let op = FutexWaitOp::new(futex.clone(), current_value);
+
+            // Just await the submit - compio handles the waker!
+            // When the futex value changes (via wake_one/wake_all), this completes
+            let _ = compio::runtime::submit(op).await;
+
+            // Note: No waiter count tracking - kernel manages waiters internally
         }
-
-        // For io_uring implementation, we don't submit here
-        // The Future's poll() method will handle submission
-        // Just track that we have a waiter
-        self.waiter_count.fetch_add(1, Ordering::Relaxed);
-
-        // Post-registration recheck to reduce lost-wake window
-        // (matches generic implementation pattern)
-        if condition() {
-            // Condition became true, remove our registration
-            self.waiter_count.fetch_sub(1, Ordering::Relaxed);
-            return true;
-        }
-
-        false // Pending - Future will handle futex submission
     }
 
     /// Wake one waiting task
