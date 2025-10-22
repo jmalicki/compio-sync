@@ -8,15 +8,12 @@
 //! These tests define the behavioral contract that ALL WaiterQueue
 //! implementations must satisfy.
 
-#![allow(dead_code)] // Test helpers not yet used (tests are #[ignore]d)
+// Test helpers are now used in actual tests
 
+use compio_sync::{WaiterQueue, WaiterQueueTrait};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Wake, Waker};
-
-// Since waiter_queue is private, we test through public APIs
-// For now, we'll need to make WaiterQueue testable
-// TODO: This will require exposing WaiterQueue for testing
 
 /// Custom waker for testing
 struct TestWaker {
@@ -78,18 +75,46 @@ impl CountingWaker {
 /// - Generic/Linux: Should always pass
 ///
 /// **Requirement:** All waiters added before wake_all() MUST be woken.
-#[test]
-#[ignore = "WaiterQueue not yet exposed for testing - will be enabled in implementation PR"]
-fn test_wake_all_wakes_all_waiters() {
-    // This test will be implemented once WaiterQueue is testable
-    // 
-    // Expected behavior:
-    // 1. Create WaiterQueue
-    // 2. Add N waiters with condition=false
-    // 3. Call wake_all()
-    // 4. Verify ALL N wakers were woken
-    //
-    // This catches the Windows auto-reset event bug where only 1 waiter is woken.
+#[compio::test]
+async fn test_wake_all_wakes_all_waiters() {
+    let queue = Arc::new(WaiterQueue::new());
+    let num_waiters = 5;
+    let mut handles = Vec::new();
+    let woken_count = Arc::new(AtomicUsize::new(0));
+
+    // Add multiple waiters
+    for _ in 0..num_waiters {
+        let queue_clone = Arc::clone(&queue);
+        let count_clone = Arc::clone(&woken_count);
+        
+        // Spawn async task that waits
+        let handle = compio::runtime::spawn(async move {
+            // This will wait until woken
+            queue_clone.add_waiter_if(|| false).await;
+            count_clone.fetch_add(1, Ordering::SeqCst);
+        });
+        handles.push(handle);
+    }
+
+    // Give time for all waiters to register
+    compio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    // Wake all waiters
+    queue.wake_all();
+
+    // Wait for all tasks to complete
+    for handle in handles {
+        handle.await.expect("Task should complete");
+    }
+
+    // ALL waiters should be woken, not just one
+    let final_count = woken_count.load(Ordering::SeqCst);
+    assert_eq!(
+        final_count, num_waiters,
+        "wake_all() should wake ALL {} waiters, but only {} were woken. \
+         This indicates the auto-reset event bug (only wakes one waiter).",
+        num_waiters, final_count
+    );
 }
 
 /// Test that wake_one() wakes exactly one waiter

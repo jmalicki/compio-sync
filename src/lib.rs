@@ -35,5 +35,8 @@ mod semaphore;
 // Platform-specific waiter queue implementation
 mod waiter_queue;
 
+// Expose WaiterQueue for testing
+pub use waiter_queue::{WaiterQueue, WaiterQueueTrait};
+
 pub use condvar::Condvar;
 pub use semaphore::{Semaphore, SemaphorePermit};
