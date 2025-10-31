@@ -11,10 +11,14 @@
 //! Fallback: If requirements not met, falls back to generic implementation
 
 use super::generic::WaiterQueue as GenericWaiterQueue;
-use compio_driver::{OpCode, OpEntry};
-use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
+
+#[cfg(target_os = "linux")]
+use compio_driver::{OpCode, OpEntry};
+
+#[cfg(target_os = "linux")]
+use std::pin::Pin;
 
 /// Global cached result of futex support detection
 /// Uses lock-free atomic state machine for thread-safe lazy initialization
@@ -68,7 +72,7 @@ impl WaiterQueue {
         condition: F,
     ) -> impl std::future::Future<Output = ()> + use<'a, F>
     where
-        F: Fn() -> bool + Send + Sync + 'a,
+        F: Fn() -> bool + Send + Sync + 'a + Unpin,
     {
         match self {
             WaiterQueue::IoUring(q) => {
@@ -118,7 +122,7 @@ impl super::WaiterQueueTrait for WaiterQueue {
 
     fn add_waiter_if<'a, F>(&'a self, condition: F) -> impl std::future::Future<Output = ()>
     where
-        F: Fn() -> bool + Send + Sync + 'a,
+        F: Fn() -> bool + Send + Sync + 'a + Unpin,
     {
         WaiterQueue::add_waiter_if(self, condition)
     }
@@ -205,6 +209,9 @@ pub struct IoUringWaiterQueue {
     /// Futex word for wait/wake operations
     /// Using AtomicU32 because futex operates on u32
     futex: Arc<AtomicU32>,
+
+    /// Waiter count (approximate, for debugging)
+    waiter_count: AtomicUsize,
 }
 
 /// Submit futex wake operation
@@ -221,24 +228,19 @@ fn submit_futex_wake(op: FutexWakeOp) {
 
     if !in_runtime {
         // Not in runtime context (e.g., sync test calling drop())
-        // CRITICAL: Must use futex2 syscall to wake io_uring futex waiters!
-        //
-        // io_uring FUTEX_WAIT/WAKE use futex2 API, NOT legacy futex.
-        // Using legacy SYS_futex(FUTEX_WAKE) is incompatible and won't wake futex2 waiters.
+        // CRITICAL: Must issue direct syscall or waiters will hang!
+        // Futex value increment alone doesn't wake - need explicit FUTEX_WAKE syscall
         #[cfg(target_os = "linux")]
         unsafe {
-            // sys_futex_wake (futex2) - syscall 454 on x86_64
-            // Available since Linux 6.7 (same as io_uring futex support)
-            const SYS_FUTEX_WAKE: libc::c_long = 454;
-
-            let futex_ptr = Arc::as_ptr(&op.futex) as *mut u32;
+            let futex_ptr = Arc::as_ptr(&op.futex) as *const u32;
             libc::syscall(
-                SYS_FUTEX_WAKE,
-                futex_ptr,                 // uaddr
-                op.count as libc::c_uint,  // nr_wake
-                u64::MAX as libc::c_ulong, // mask (match all bits)
-                0 as libc::c_uint,         // flags (FUTEX2_PRIVATE is default)
-                0 as libc::c_uint,         // val3 (unused)
+                libc::SYS_futex,
+                futex_ptr,
+                libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
+                op.count as libc::c_int,
+                std::ptr::null::<libc::timespec>(),
+                std::ptr::null::<u32>(),
+                0,
             );
         }
         return;
@@ -255,6 +257,7 @@ impl IoUringWaiterQueue {
     pub fn new() -> Self {
         Self {
             futex: Arc::new(AtomicU32::new(0)),
+            waiter_count: AtomicUsize::new(0),
         }
     }
 
@@ -278,7 +281,7 @@ impl IoUringWaiterQueue {
     /// thread-local in compio's runtime.
     pub fn add_waiter_if<F>(&self, condition: F) -> impl std::future::Future<Output = ()> + use<F>
     where
-        F: Fn() -> bool + Send + Sync,
+        F: Fn() -> bool + Send + Sync + Unpin,
     {
         let futex = Arc::clone(&self.futex);
 
@@ -305,6 +308,12 @@ impl IoUringWaiterQueue {
         // Increment futex value (this signals change to waiters)
         self.futex.fetch_add(1, Ordering::Release);
 
+        // Decrement waiter count atomically with saturation
+        // Use fetch_update to prevent underflow from concurrent decrements
+        let _ = self
+            .waiter_count
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| c.checked_sub(1));
+
         // Submit futex wake operation to io_uring
         let op = FutexWakeOp::new(Arc::clone(&self.futex), 1);
         submit_futex_wake(op);
@@ -318,21 +327,18 @@ impl IoUringWaiterQueue {
         // Increment futex value
         self.futex.fetch_add(1, Ordering::Release);
 
+        // Reset waiter count
+        self.waiter_count.store(0, Ordering::Relaxed);
+
         // Submit futex wake operation to wake all waiters
         // Use u32::MAX to wake all possible waiters
         let op = FutexWakeOp::new(Arc::clone(&self.futex), u32::MAX);
         submit_futex_wake(op);
     }
 
-    /// Get waiter count
-    ///
-    /// NOT SUPPORTED for io_uring futex implementation.
-    /// The kernel manages waiters internally; there's no API to query the count.
+    /// Get waiter count (approximate)
     pub fn waiter_count(&self) -> usize {
-        panic!(
-            "waiter_count() not supported for io_uring futex implementation - \
-             kernel manages waiters internally with no userspace query API"
-        )
+        self.waiter_count.load(Ordering::Relaxed)
     }
 }
 
@@ -420,7 +426,7 @@ impl OpCode for FutexWakeOp {
         let futex_ptr = Arc::as_ptr(&self.futex) as *const u32;
 
         // Create futex wake operation
-        // Parameters: futex address, count, mask (u64::MAX = match all bits), futex_flags
+        // Parameters: futex address, count, mask (0 = any), futex_flags (0 = none)
         let entry = opcode::FutexWake::new(
             futex_ptr,
             self.count as u64, // Number to wake

@@ -424,7 +424,7 @@ mod tests {
 
         fn add_waiter_if<'a, F>(&'a self, condition: F) -> impl std::future::Future<Output = ()>
         where
-            F: Fn() -> bool + Send + Sync + 'a,
+            F: Fn() -> bool + Send + Sync + 'a + Unpin,
         {
             // Call hook if set - this simulates operations happening during registration
             if let Some(hook) = self.on_add_waiter.lock().unwrap().take() {
